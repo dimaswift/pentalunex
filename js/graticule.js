@@ -20,4 +20,13 @@ export function drawGraticule(ctx, faceIdx, N, opts) {
     for (let lon = -180; lon <= 180; lon += 0.5) eq.push([lon, 0]);
     drawPolylineOnFace(ctx, faceIdx, eq, N, lineOpts);
   }
+
+  // Draw face boundary as a pixel-space rectangle — face edges are great circle
+  // arcs which project as straight lines in gnomonic, so pixel-space lines are exact.
+  ctx.save();
+  ctx.globalAlpha = lineOpts.alpha;
+  ctx.strokeStyle = lineOpts.stroke;
+  ctx.lineWidth = lineOpts.width;
+  ctx.strokeRect(0, 0, N, N);
+  ctx.restore();
 }

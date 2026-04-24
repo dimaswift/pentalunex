@@ -7,7 +7,8 @@ import { createScene } from './scene.js';
 import { TILE_SOURCES, renderFaceTiles } from './map-tiles.js';
 import { renderFaceSolid, getCoastlineData } from './map-solid.js';
 import { drawGraticule } from './graticule.js';
-import { loadSarosBin, ensureSolarDB, drawEclipseGeometry } from './eclipse-overlay.js';
+import { getCellAtPixel, drawGraticuleCellOnFace } from './graticule-cells.js';
+import { loadSarosBin, ensureSolarDB, drawEclipseGeometry, getCellsByFace } from './eclipse-overlay.js';
 
 const $ = id => document.getElementById(id);
 
@@ -19,12 +20,36 @@ const { renderer, scene, camera, controls, faceMeshes, faceBase, faceDisplay, wi
 // ── App state ─────────────────────────────────────────────────────────────────
 const gratState = { enabled: false, step: 15, width: 1, color: '#ffffff', alpha: 0.5 };
 const eclipseState = []; // [{ key, saros, pos, geometry, type, outline, fill, ... }]
+const cellHighlight = { face: null, lonIdx: null, latIdx: null };
 
 function compositeAll() {
   composite((ctx, f, N) => {
     if (gratState.enabled) drawGraticule(ctx, f, N, gratState);
     for (const ec of eclipseState) {
       if (ec.geometry) drawEclipseGeometry(ctx, f, N, ec.geometry, ec);
+    }
+    // Draw eclipse cell highlights (cells pre-assigned to faces, no extra check needed)
+    for (const ec of eclipseState) {
+      if (ec.touchedCells) {
+        for (const cell of ec.touchedCells[f]) {
+          drawGraticuleCellOnFace(ctx, f, cell.lonIdx, cell.latIdx, gratState.step, N, {
+            fill: ec.fill + '22',
+            stroke: ec.fill,
+            width: 2,
+            alpha: 0.5
+          });
+        }
+      }
+    }
+    // Draw hovered graticule cell (on top)
+    if (cellHighlight.face === f && cellHighlight.lonIdx !== null) {
+      drawGraticuleCellOnFace(ctx, f, cellHighlight.lonIdx, cellHighlight.latIdx,
+        gratState.step, N, {
+          fill: 'rgba(0, 255, 100, 0.2)',
+          stroke: '#00ff64',
+          width: 3,
+          alpha: 1
+        });
     }
   });
 }
@@ -84,6 +109,7 @@ async function addEclipse(saros, pos) {
   const entry = {
     key, saros, pos,
     geometry: null, type: null,
+    touchedCells: [], // Cache touched cells to avoid recomputation
     outline: color, fill: color, fillEnabled: true,
     width: 2, alpha: 0.9,
     label: `S${saros}-${pos} loading…`,
@@ -96,6 +122,7 @@ async function addEclipse(saros, pos) {
     if (!rec) throw new Error(`no record at pos ${pos}`);
     entry.geometry = rec.geometry;
     entry.type = rec.type;
+    entry.touchedCells = getCellsByFace(rec.geometry, gratState.step);
     entry.label = `S${saros}-${pos} ${rec.datetime_utc} (${rec.type})`;
     renderEclipseList();
     compositeAll();
@@ -153,8 +180,8 @@ $('btn-add-eclipse').addEventListener('click', () => {
   if (Number.isFinite(saros) && Number.isFinite(pos)) addEclipse(saros, pos);
 });
 
-populateEclipseSelect(SAROS_MIN);
-
+populateEclipseSelect(141, 21);
+ $('saros-select').value = 141;
 // ── Eclipse search by date ────────────────────────────────────────────────────
 // Accepts "YYYY-MM-DD", optional "[ T]HH:MM[:SS]", with optional negative year
 // for antiquity (e.g. "-1000-06-15").
@@ -280,6 +307,18 @@ const raycaster = new THREE.Raycaster();
 const mouse     = new THREE.Vector2();
 const coordsDiv = $('coords');
 
+function updateCellHighlight(newFace, newLonIdx, newLatIdx) {
+  const changed = cellHighlight.face !== newFace ||
+                  cellHighlight.lonIdx !== newLonIdx ||
+                  cellHighlight.latIdx !== newLatIdx;
+  if (changed) {
+    cellHighlight.face = newFace;
+    cellHighlight.lonIdx = newLonIdx;
+    cellHighlight.latIdx = newLatIdx;
+    compositeAll();
+  }
+}
+
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   mouse.x = ((e.clientX - rect.left) / rect.width)  * 2 - 1;
@@ -292,11 +331,21 @@ canvas.addEventListener('mousemove', e => {
     const xF   = hit.uv.x * 2 - 1;
     const yF   = hit.uv.y * 2 - 1;
     const { lat, lon } = faceXYToLatLon(face, xF, yF);
+
+    // Convert UV coordinates to pixel coordinates and detect cell
+    const N = faceDisplay[face].width;
+    const px = hit.uv.x * N;
+    const py = (1 - hit.uv.y) * N;
+    const cell = getCellAtPixel(face, px, py, N, gratState.step);
+    updateCellHighlight(face, cell.lonIdx, cell.latIdx);
+
     coordsDiv.innerHTML =
       `<span>Face:</span> ${face} — ${FACE_NAMES[face]}<br>` +
       `<span>x, y:</span> ${xF.toFixed(3)}, ${yF.toFixed(3)}<br>` +
-      `<span>Lat/Lon:</span> ${lat.toFixed(3)}°, ${lon.toFixed(3)}°`;
+      `<span>Lat/Lon:</span> ${lat.toFixed(3)}°, ${lon.toFixed(3)}°<br>` +
+      `<span>Cell:</span> [${cell.lonIdx}, ${cell.latIdx}]`;
   } else {
+    updateCellHighlight(null, null, null);
     coordsDiv.innerHTML = 'Hover over cube…<br><span>Face:</span> —<br><span>x, y:</span> —<br><span>Lat/Lon:</span> —';
   }
 });
