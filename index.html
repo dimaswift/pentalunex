@@ -175,6 +175,18 @@
     </div>
 
     <div class="section">
+      <div class="section-title">Export SVG</div>
+      <div id="export-faces" style="display:flex; flex-direction:column; gap:3px;"></div>
+      <div class="row">
+        <label>Hatch mm</label>
+        <input type="number" id="hatch-interval" min="0.1" max="20" step="0.1" value="1">
+        <label>Scale</label>
+        <input type="number" id="export-scale" min="0.01" max="100" step="0.1" value="1">
+      </div>
+      <button id="btn-export-svg">Export SVG</button>
+    </div>
+
+    <div class="section">
       <div class="section-title">Cube</div>
       <label><input type="checkbox" id="wire-toggle"> Wireframe</label>
       <label><input type="checkbox" id="auto-rotate"> Auto-rotate</label>

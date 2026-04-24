@@ -9,6 +9,7 @@ import { renderFaceSolid, getCoastlineData } from './map-solid.js';
 import { drawGraticule } from './graticule.js';
 import { getCellAtPixel, drawGraticuleCellOnFace } from './graticule-cells.js';
 import { loadSarosBin, ensureSolarDB, drawEclipseGeometry, getCellsByFace } from './eclipse-overlay.js';
+import { exportFaces as exportFacesSvg } from './svg-export.js';
 
 const $ = id => document.getElementById(id);
 
@@ -21,6 +22,7 @@ const { renderer, scene, camera, controls, faceMeshes, faceBase, faceDisplay, wi
 const gratState = { enabled: false, step: 15, width: 1, color: '#ffffff', alpha: 0.5 };
 const eclipseState = []; // [{ key, saros, pos, geometry, type, outline, fill, ... }]
 const cellHighlight = { face: null, lonIdx: null, latIdx: null };
+const exportFaces = new Set(); // face indices selected for SVG export
 
 function compositeAll() {
   composite((ctx, f, N) => {
@@ -124,6 +126,7 @@ async function addEclipse(saros, pos) {
     entry.type = rec.type;
     entry.touchedCells = getCellsByFace(rec.geometry, gratState.step);
     entry.label = `S${saros}-${pos} ${rec.datetime_utc} (${rec.type})`;
+    autoSelectEclipseFaces(entry.touchedCells);
     renderEclipseList();
     compositeAll();
   } catch (e) {
@@ -269,6 +272,41 @@ $('wire-toggle').addEventListener('change', e => wireMesh.visible = e.target.che
 
 let autoRotate = false;
 $('auto-rotate').addEventListener('change', e => autoRotate = e.target.checked);
+
+// ── SVG export ────────────────────────────────────────────────────────────────
+function renderExportFaces() {
+  const container = $('export-faces');
+  container.innerHTML = '';
+  FACE_NAMES.forEach((name, f) => {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = exportFaces.has(f);
+    cb.addEventListener('change', () => {
+      if (cb.checked) exportFaces.add(f); else exportFaces.delete(f);
+    });
+    label.appendChild(cb);
+    label.append(` ${name}`);
+    container.appendChild(label);
+  });
+}
+renderExportFaces();
+
+function autoSelectEclipseFaces(touchedCells) {
+  // touchedCells is array of 6 arrays; select faces with any touched cells
+  touchedCells.forEach((cells, f) => {
+    if (cells.length > 0) exportFaces.add(f);
+  });
+  renderExportFaces();
+}
+
+$('btn-export-svg').addEventListener('click', () => {
+  const faces = [...exportFaces].sort();
+  if (!faces.length) { alert('Select at least one face to export.'); return; }
+  const N = faceDisplay[0].width;
+  const hatchInterval = parseFloat($('hatch-interval').value) || 0;
+  exportFacesSvg(faces, N, gratState, eclipseState, hatchInterval);
+});
 
 // ── Import / export ───────────────────────────────────────────────────────────
 $('import-files').addEventListener('change', async e => {

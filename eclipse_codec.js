@@ -18,13 +18,20 @@ export const BITS = Object.freeze({
   LAT: 29,
   LON: 29,
   SUN: 7,
+  MAG: 14,
+  GAMMA_MAG: 14,
   HAS_DUR: 1,
   DUR: 10,
+  HAS_CWK: 1,
+  CWK: 11,
   NPOLY: 5,
   NPTS: 13,
 });
 const COORD_SCALE = 1_000_000;
 const COORD_MAG_MAX = 1 << 28;
+const MAG_SCALE = 10_000;
+const MAG_MAG_MAX = 1 << 14;
+const CWK_MAX = 1 << 11;
 
 // ---------------------------------------------------------------------------
 // Bit-level I/O. All values are written MSB-first within each byte. ``bits``
@@ -156,6 +163,10 @@ export function roundCoord(value) {
   return Math.round(value * COORD_SCALE) / COORD_SCALE;
 }
 
+export function roundMag(value) {
+  return Math.round(value * MAG_SCALE) / MAG_SCALE;
+}
+
 // Format a unix timestamp (seconds since 1970-01-01 UTC) as
 // ``YYYY-MM-DD HH:MM:SS``. Supports negative values (dates before the epoch).
 export function datetimeFromUnix(unixTime) {
@@ -188,9 +199,24 @@ export function encodeEclipse(bw, record, unixTime) {
   encodeCoord(bw, record.latitude);
   encodeCoord(bw, record.longitude);
   bw.writeUint(record.sun_altitude | 0, BITS.SUN);
+  const mag = Math.round(record.magnitude * MAG_SCALE);
+  if (mag < 0 || mag >= MAG_MAG_MAX) throw new Error(`magnitude out of range: ${record.magnitude}`);
+  bw.writeUint(mag, BITS.MAG);
+  const gscaled = Math.round(record.gamma * MAG_SCALE);
+  const gsign = gscaled < 0 ? 1 : 0;
+  const gmag = Math.abs(gscaled);
+  if (gmag >= MAG_MAG_MAX) throw new Error(`gamma out of range: ${record.gamma}`);
+  bw.writeUint(gsign, 1);
+  bw.writeUint(gmag, BITS.GAMMA_MAG);
   const hasDur = record.central_duration != null;
   bw.writeUint(hasDur ? 1 : 0, BITS.HAS_DUR);
   if (hasDur) bw.writeUint(record.central_duration | 0, BITS.DUR);
+  const hasCwk = record.central_width_km != null;
+  bw.writeUint(hasCwk ? 1 : 0, BITS.HAS_CWK);
+  if (hasCwk) {
+    if (record.central_width_km >= CWK_MAX) throw new Error(`central_width_km out of range: ${record.central_width_km}`);
+    bw.writeUint(record.central_width_km | 0, BITS.CWK);
+  }
   const polys = record.geometry.coordinates;
   bw.writeUint(polys.length, BITS.NPOLY);
   for (const poly of polys) {
@@ -210,13 +236,23 @@ export function decodeEclipse(br) {
   const latitude = decodeCoord(br);
   const longitude = decodeCoord(br);
   const sun_altitude = br.readUint(BITS.SUN);
+  const magnitude = br.readUint(BITS.MAG) / MAG_SCALE;
+  const gsign = br.readUint(1);
+  const gmag = br.readUint(BITS.GAMMA_MAG);
+  const gamma = (gsign ? -gmag : gmag) / MAG_SCALE;
   const hasDur = br.readUint(BITS.HAS_DUR);
+  const central_duration = hasDur ? br.readUint(BITS.DUR) : null;
+  const hasCwk = br.readUint(BITS.HAS_CWK);
+  const central_width_km = hasCwk ? br.readUint(BITS.CWK) : null;
   const record = {
     type: TYPE_NAMES[typeIdx],
     latitude,
     longitude,
+    magnitude,
+    gamma,
   };
-  if (hasDur) record.central_duration = br.readUint(BITS.DUR);
+  if (central_duration != null) record.central_duration = central_duration;
+  if (central_width_km != null) record.central_width_km = central_width_km;
   record.sun_altitude = sun_altitude;
   record.datetime_utc = datetimeFromUnix(unixTime);
   const nPolys = br.readUint(BITS.NPOLY);
