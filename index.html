@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-title" content="Pentalunex" />
+<link rel="manifest" href="/site.webmanifest" />
+<title>Pentalunex</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a14; color: #ccc; font-family: monospace; overflow: hidden; }
+  #app { display: flex; width: 100vw; height: 100vh; }
+
+  #sidebar {
+    width: 320px; min-width: 320px;
+    background: #111;
+    border-right: 1px solid #333;
+    padding: 14px;
+    overflow-y: auto;
+    display: flex; flex-direction: column; gap: 10px;
+    z-index: 10;
+  }
+  #sidebar h1 { font-size: 13px; color: #7af; letter-spacing: 1px; text-transform: uppercase; }
+  #sidebar p  { font-size: 11px; line-height: 1.5; color: #888; }
+  .section {
+    border: 1px solid #222; border-radius: 4px; padding: 8px;
+    background: #0d0d1a; display: flex; flex-direction: column; gap: 6px;
+  }
+  .section-title {
+    font-size: 10px; color: #7af; text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 2px;
+  }
+
+  select, input[type=range], input[type=number], input[type=text] {
+    width: 100%; background: #1a1a2e; color: #ccc;
+    border: 1px solid #444; padding: 4px 6px; font-size: 12px; border-radius: 3px;
+    font-family: monospace;
+  }
+  input[type=color] {
+    width: 34px; height: 22px; padding: 0; border: 1px solid #444;
+    background: #1a1a2e; cursor: pointer; border-radius: 3px;
+  }
+  label { font-size: 11px; color: #aaa; display: block; }
+  .row { display: flex; align-items: center; gap: 6px; }
+  .row > label { flex: 1; margin: 0; }
+  .row > input[type=range] { flex: 2; }
+  .row > input[type=number] { width: 60px; }
+
+  #coords {
+    font-size: 11px; background: #0d0d1a; padding: 8px;
+    border: 1px solid #333; border-radius: 3px; line-height: 1.7;
+  }
+  #coords span { color: #7af; }
+
+  button {
+    width: 100%; padding: 7px; background: #1a3a6a; color: #adf;
+    border: 1px solid #2a5aaa; border-radius: 3px; cursor: pointer;
+    font-size: 12px; font-family: monospace;
+  }
+  button:hover { background: #1e4a8a; }
+  button.secondary { background: #222; color: #aaa; border-color: #333; }
+  button.secondary:hover { background: #2a2a3a; }
+  button.danger { background: #3a1a1a; color: #faa; border-color: #5a2a2a; padding: 3px 6px; width: auto; font-size: 11px; }
+
+  .eclipse-item {
+    border: 1px solid #223; border-radius: 3px; padding: 6px;
+    background: #0a0a18; display: flex; flex-direction: column; gap: 4px;
+    font-size: 11px;
+  }
+  .eclipse-item .head { display: flex; align-items: center; gap: 6px; }
+  .eclipse-item .head .id { flex: 1; color: #adf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .eclipse-item .row label { font-size: 10px; }
+
+  #canvas-container { flex: 1; position: relative; }
+  #three-canvas { width: 100%; height: 100%; display: block; }
+
+  #loading {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%,-50%);
+    background: rgba(0,0,20,0.85); padding: 20px 30px;
+    border: 1px solid #335; border-radius: 6px;
+    font-size: 13px; color: #7af; text-align: center;
+  }
+  #progress { margin-top: 8px; font-size: 11px; color: #888; }
+
+  input[type=checkbox] { vertical-align: middle; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="sidebar">
+    <h1>🌍 Pentalunex</h1>
+    <p>Eclipses projected onto Quadrilateralized Spherical Cube</p>
+
+    <div class="section">
+      <div class="section-title">Map Source</div>
+      <label for="tile-source">Layer</label>
+      <select id="tile-source">
+        <option value="solid">Solid colors (Natural Earth)</option>
+        <option value="osm">OpenStreetMap</option>
+        <option value="topo">OpenTopoMap</option>
+        <option value="positron">CartoDB Positron</option>
+        <option value="dark">CartoDB Dark</option>
+        <option value="voyager">CartoDB Voyager</option>
+        <option value="satellite">ESRI Satellite</option>
+       
+      </select>
+      <label><input type="checkbox" id="no-labels"> Hide labels (CartoDB only)</label>
+      <div id="solid-colors" class="hidden" style="display: flex; flex-direction: column; gap: 4px;">
+        <div class="row"><label>Ocean</label><input type="color" id="ocean-color" value="#ffffff"></div>
+        <div class="row"><label>Ground</label><input type="color" id="ground-color" value="#aaaaaa"></div>
+        <div class="row"><label>Coast</label><input type="color" id="coast-color" value="#000000">
+          <input type="number" id="coast-width" min="0" max="10" step="0.5" value="1"></div>
+      </div>
+      <div class="row">
+        <label for="tex-res">Res <span id="res-val">1024</span>px</label>
+        <input type="range" id="tex-res" min="64" max="8192" step="256" value="1024">
+      </div>
+      <div class="row">
+        <label for="zoom-level">Zoom <span id="zoom-val">3</span></label>
+        <input type="range" id="zoom-level" min="1" max="5" step="1" value="3">
+      </div>
+      <button id="btn-render">Render Textures</button>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Import / Export</div>
+      <label>Import 6 face PNGs (order: N, +X, +Y, −X, −Y, S)</label>
+      <input type="file" id="import-files" accept="image/png,image/jpeg" multiple
+             style="font-size: 10px; color: #888;">
+      <button id="btn-export">Export faces as PNG</button>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Graticule</div>
+      <label><input checked type="checkbox" id="grat-on"> Enabled</label>
+      <div class="row">
+        <label>Step°</label>
+        <input type="number" id="grat-step" min="1" max="90" step="15" value="30">
+      </div>
+      <div class="row">
+        <label>Width</label>
+        <input type="number" id="grat-width" min="0.5" max="8" step="0.5" value="4">
+        <label>Color</label>
+        <input type="color" id="grat-color" value="#000000">
+      </div>
+      <div class="row">
+        <label>Alpha <span id="grat-alpha-val">0.8</span></label>
+        <input type="range" id="grat-alpha" min="0" max="1" step="0.05" value="0.5">
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Eclipse Paths</div>
+      <label>Search closest solar eclipse</label>
+      <div class="row">
+        <input type="text" id="search-date" placeholder="YYYY-MM-DD" style="flex:2;">
+        <button id="btn-search" style="width:auto; padding:4px 10px;">Find</button>
+      </div>
+      <div id="search-result" style="font-size: 10px; color: #888; min-height: 12px;"></div>
+      <div class="row">
+        <label>Saros</label>
+        <select id="saros-select" style="flex:2;"></select>
+      </div>
+      <div class="row">
+        <select id="eclipse-select" style="flex:1;"></select>
+        <button id="btn-add-eclipse" style="width:auto; padding:4px 10px;">Add</button>
+      </div>
+      <div id="eclipse-list"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Cube</div>
+      <label><input type="checkbox" id="wire-toggle"> Wireframe</label>
+      <label><input type="checkbox" id="auto-rotate"> Auto-rotate</label>
+    </div>
+
+    <div id="coords">
+      Hover over cube…<br>
+      <span>Face:</span> —<br>
+      <span>x, y:</span> —<br>
+      <span>Lat/Lon:</span> —
+    </div>
+
+    <p>Drag to rotate · Scroll to zoom · Right-drag to pan</p>
+  </div>
+
+  <div id="canvas-container">
+    <canvas id="three-canvas"></canvas>
+    <div id="loading">
+      <div id="loading-title">Initialising…</div>
+      <div id="progress"></div>
+    </div>
+  </div>
+
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
