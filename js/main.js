@@ -15,7 +15,8 @@ const $ = id => document.getElementById(id);
 
 const canvas = $('three-canvas');
 const container = $('canvas-container');
-const { renderer, scene, camera, controls, faceMeshes, faceBase, faceDisplay, wireMesh, composite } =
+const { renderer, scene, camera, controls, faceMeshes, overlayMeshes,
+        faceBase, faceOverlay, wireMesh, compositeMap, compositeOverlay } =
   createScene(canvas, container);
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -25,7 +26,7 @@ const cellHighlight = { face: null, lonIdx: null, latIdx: null };
 const exportFaces = new Set(); // face indices selected for SVG export
 
 function compositeAll() {
-  composite((ctx, f, N) => {
+  compositeOverlay((ctx, f, N) => {
     if (gratState.enabled) drawGraticule(ctx, f, N, gratState);
     for (const ec of eclipseState) {
       if (ec.geometry) drawEclipseGeometry(ctx, f, N, ec.geometry, ec);
@@ -254,6 +255,7 @@ async function renderAllFaces() {
     }
   }
 
+  compositeMap();
   compositeAll();
   loading.style.display = 'none';
 }
@@ -303,7 +305,7 @@ function autoSelectEclipseFaces(touchedCells) {
 $('btn-export-svg').addEventListener('click', () => {
   const faces = [...exportFaces].sort();
   if (!faces.length) { alert('Select at least one face to export.'); return; }
-  const N = faceDisplay[0].width;
+  const N = faceOverlay[0].width;
   const hatchInterval = parseFloat($('hatch-interval').value) || 0;
   exportFacesSvg(faces, N, gratState, eclipseState, hatchInterval);
 });
@@ -324,13 +326,20 @@ $('import-files').addEventListener('change', async e => {
     faceBase[i].getContext('2d', { willReadFrequently: true }).drawImage(bmp, 0, 0, n, n);
     bmp.close();
   }
+  compositeMap();
   compositeAll();
 });
 
 $('btn-export').addEventListener('click', () => {
   const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
   for (let i = 0; i < 6; i++) {
-    const url = faceDisplay[i].toDataURL('image/png');
+    // Composite map + overlay into a temp canvas for PNG export
+    const tmp = document.createElement('canvas');
+    tmp.width = faceBase[i].width; tmp.height = faceBase[i].height;
+    const ctx = tmp.getContext('2d');
+    ctx.drawImage(faceBase[i], 0, 0);
+    ctx.drawImage(faceOverlay[i], 0, 0);
+    const url = tmp.toDataURL('image/png');
     const a = document.createElement('a');
     a.href = url;
     a.download = `face_${i}_${stamp}.png`;
@@ -371,7 +380,7 @@ canvas.addEventListener('mousemove', e => {
     const { lat, lon } = faceXYToLatLon(face, xF, yF);
 
     // Convert UV coordinates to pixel coordinates and detect cell
-    const N = faceDisplay[face].width;
+    const N = faceOverlay[face].width;
     const px = hit.uv.x * N;
     const py = (1 - hit.uv.y) * N;
     const cell = getCellAtPixel(face, px, py, N, gratState.step);
