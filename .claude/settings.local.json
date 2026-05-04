@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat)",
+      "Bash(c++ -std=c++17 -Wall -Wextra -I. /tmp/pentalunex_check.cpp -o /tmp/pentalunex_check)",
+      "Bash(/tmp/pentalunex_check)"
+    ]
+  }
+}
