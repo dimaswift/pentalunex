@@ -188,7 +188,7 @@
 
     <div class="section">
       <div class="section-title">Reflector</div>
-      <label><input type="checkbox" id="refl-on" checked> Show rays</label>
+      <label><input type="checkbox" id="refl-on"> Show rays</label>
       <div class="row">
         <label>Step°</label>
         <input type="number" id="refl-step" min="0.5" max="20" step="0.5" value="2">
@@ -210,7 +210,7 @@
       <div class="section-title">View</div>
       <label><input type="checkbox" id="wire-toggle"> Wireframe</label>
       <label><input type="checkbox" id="auto-rotate"> Auto-rotate</label>
-      <label><input type="checkbox" id="sphere-on" checked> Show sphere</label>
+      <label><input type="checkbox" id="sphere-on"> Show sphere</label>
     </div>
 
     <div class="section">
@@ -224,7 +224,22 @@
         <button id="btn-export-front" style="flex:1;">Export front PNG</button>
         <button id="btn-export-back" style="flex:1;">Export back PNG</button>
       </div>
-      <button id="btn-export-iso" style="width:100%;">Export isometric (cropped)</button>
+      <div class="row">
+        <label>Corner</label>
+        <select id="iso-corner">
+          <option value="0">0 — (−X, −Y, −Z)</option>
+          <option value="1">1 — (+X, −Y, −Z)</option>
+          <option value="2">2 — (−X, +Y, −Z)</option>
+          <option value="3">3 — (+X, +Y, −Z)</option>
+          <option value="4">4 — (−X, −Y, +Z)</option>
+          <option value="5">5 — (+X, −Y, +Z)</option>
+          <option value="6">6 — (−X, +Y, +Z)</option>
+          <option value="7" selected>7 — (+X, +Y, +Z)</option>
+        </select>
+      </div>
+      <button id="btn-export-map-grat" style="width:100%;">Export map + graticule</button>
+      <button id="btn-export-path-cells" style="width:100%;">Export path + cells + metadata</button>
+      <button id="btn-export-all-corners" style="width:100%;">Export all 8 paths (zip)</button>
     </div>
 
     <div id="coords">

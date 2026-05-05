@@ -9,7 +9,8 @@ import { renderFaceSolid, getCoastlineData } from './map-solid.js';
 import { drawGraticule } from './graticule.js';
 import { getCellAtPixel, drawGraticuleCellOnFace } from './graticule-cells.js';
 import { loadSarosBin, ensureSolarDB, drawEclipseGeometry, getCellsByFace } from './eclipse-overlay.js';
-import { exportFaces as exportFacesSvg } from './svg-export.js';
+import { exportFaces as exportFacesSvg, buildIsoGraticuleSvg } from './svg-export.js';
+import { buildZip } from './zip.js';
 import { extractCenterlines, castReflectorRays } from './reflector.js';
 import { drawPolylineOnFace } from './projection.js';
 
@@ -22,9 +23,14 @@ const { renderer, scene, camera, controls, faceMeshes, overlayMeshes,
         faceBase, faceOverlay, wireMesh, compositeMap, compositeOverlay } =
   createScene(canvas, container);
 
+// Sphere is hidden by default — recentre the cube on origin to match the
+// `sphere-on` checkbox unchecked state.
+sphereGroup.visible = false;
+cubeGroup.position.x = 0;
+
 // ── App state ─────────────────────────────────────────────────────────────────
 const gratState = { enabled: false, step: 15, width: 1, color: '#ffffff', alpha: 0.5 };
-const reflState = { enabled: true, stepDeg: 2, lengthDeg: 120, side: +1 };
+const reflState = { enabled: false, stepDeg: 2, lengthDeg: 120, side: +1 };
 const eclipseState = []; // [{ key, saros, pos, geometry, type, outline, fill, ... }]
 const cellHighlight = { face: null, lonIdx: null, latIdx: null };
 const exportFaces = new Set(); // face indices selected for SVG export
@@ -605,66 +611,90 @@ function exportComposite(view /* 'front' | 'back' */) {
 $('btn-export-front').addEventListener('click', () => exportComposite('front'));
 $('btn-export-back').addEventListener('click',  () => exportComposite('back'));
 
-// ── Export isometric — one PNG per layer ──────────────────────────────────────
-// Renders the cube four times (map / graticule / eclipse path / cells) into
-// the same offscreen RT and crop box, producing separate transparent PNGs that
-// can be composited in any graphics tool.
-function exportIsometric() {
-  const size  = parseInt($('composite-size').value) || 2048;
-  const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+// ── Isometric export ──────────────────────────────────────────────────────────
+// Two operations, each parameterised by a corner index 0-7:
+//   • map + graticule  → map PNG + graticule SVG
+//   • path + cells     → eclipse-path PNG + cells SVG + metadata.json
+// Both share the same view setup so outputs from a given corner register.
 
+const FRUSTUM_HALF = 0.9;
+const CORNER_LABELS = [
+  '(-X,-Y,-Z)', '(+X,-Y,-Z)', '(-X,+Y,-Z)', '(+X,+Y,-Z)',
+  '(-X,-Y,+Z)', '(+X,-Y,+Z)', '(-X,+Y,+Z)', '(+X,+Y,+Z)',
+];
+const CORNER_VISIBLE_FACES = [
+  [5, 3, 4], [5, 3, 2], [0, 3, 4], [0, 3, 2],
+  [5, 1, 4], [5, 1, 2], [0, 1, 4], [0, 1, 2],
+];
+
+function getSelectedCorner() {
+  return parseInt($('iso-corner').value) || 0;
+}
+
+function setCornerCamera(cornerIdx, distance, target) {
+  const dir = new THREE.Vector3(
+    (cornerIdx & 1) ? 1 : -1,
+    (cornerIdx & 2) ? 1 : -1,
+    (cornerIdx & 4) ? 1 : -1,
+  ).normalize();
+  camera.position.copy(target).addScaledVector(dir, distance);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(target);
+  camera.updateMatrixWorld();
+  controls.target.copy(target);
+}
+
+// Set up the offscreen render: hide sphere, recentre cube *in canonical
+// orientation* (autoOrientCube would otherwise rotate the cube to expose the
+// eclipse-relevant faces interactively — for export the camera alone moves),
+// set ortho frustum, position camera at the chosen corner.
+function setupIsometricRender(cornerIdx, size) {
   const prev = {
-    cubePos:      cubeGroup.position.clone(),
-    sphereOn:     sphereGroup.visible,
-    cameraPos:    camera.position.clone(),
-    cameraRot:    camera.rotation.clone(),
-    cameraZoom:   camera.zoom,
-    frustum:      { left: camera.left, right: camera.right, top: camera.top, bottom: camera.bottom },
-    controlTgt:   controls.target.clone(),
-    sceneBg:      scene.background,
+    cubePos:    cubeGroup.position.clone(),
+    cubeQuat:   cubeGroup.quaternion.clone(),
+    sphereOn:   sphereGroup.visible,
+    cameraPos:  camera.position.clone(),
+    cameraRot:  camera.rotation.clone(),
+    cameraZoom: camera.zoom,
+    frustum:    { left: camera.left, right: camera.right, top: camera.top, bottom: camera.bottom },
+    controlTgt: controls.target.clone(),
+    sceneBg:    scene.background,
     rendererClear: renderer.getClearAlpha(),
   };
 
   sphereGroup.visible = false;
   cubeGroup.position.set(0, 0, 0);
+  cubeGroup.quaternion.identity();
   scene.background = null;
-
-  const half = 0.9;
-  camera.left = -half; camera.right = half;
-  camera.top  =  half; camera.bottom = -half;
+  camera.left = -FRUSTUM_HALF; camera.right = FRUSTUM_HALF;
+  camera.top  =  FRUSTUM_HALF; camera.bottom = -FRUSTUM_HALF;
   camera.zoom = 1;
-  setIsometricCamera(5, new THREE.Vector3(0, 0, 0));
+  setCornerCamera(cornerIdx, 5, new THREE.Vector3(0, 0, 0));
   camera.updateProjectionMatrix();
   scene.updateMatrixWorld(true);
 
-  // Compute the pixel crop box from the cube's 8 projected corners — reused
-  // for every layer so all PNGs are the same dimensions and register exactly.
+  // Crop box — projected bbox of the 8 cube corners.
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (let i = 0; i < 8; i++) {
     const v = new THREE.Vector3(
-      (i & 1) ? 0.5 : -0.5,
-      (i & 2) ? 0.5 : -0.5,
-      (i & 4) ? 0.5 : -0.5,
+      (i & 1) ? 0.5 : -0.5, (i & 2) ? 0.5 : -0.5, (i & 4) ? 0.5 : -0.5,
     ).applyMatrix4(cubeGroup.matrixWorld).project(camera);
     const px = (v.x + 1) * 0.5 * size;
     const py = (1 - v.y) * 0.5 * size;
-    if (px < minX) minX = px;
-    if (px > maxX) maxX = px;
-    if (py < minY) minY = py;
-    if (py > maxY) maxY = py;
+    if (px < minX) minX = px; if (px > maxX) maxX = px;
+    if (py < minY) minY = py; if (py > maxY) maxY = py;
   }
   const cropX = Math.max(0, Math.floor(minX));
   const cropY = Math.max(0, Math.floor(minY));
   const cropW = Math.min(size - cropX, Math.ceil(maxX) - cropX);
   const cropH = Math.min(size - cropY, Math.ceil(maxY) - cropY);
-  const rtY   = size - (cropY + cropH); // bottom-up Y for readRenderTargetPixels
+  const rtY   = size - (cropY + cropH);
 
   const rt = new THREE.WebGLRenderTarget(size, size, {
     type: THREE.UnsignedByteType, format: THREE.RGBAFormat,
     colorSpace: THREE.SRGBColorSpace,
   });
 
-  // Render current scene state → cropped, Y-flipped canvas.
   function renderCropped() {
     renderer.setRenderTarget(rt);
     renderer.setClearColor(0x000000, 0);
@@ -682,79 +712,222 @@ function exportIsometric() {
     return out;
   }
 
-  function download(canvas2d, name) {
-    const a = document.createElement('a');
-    a.href = canvas2d.toDataURL('image/png');
-    a.download = `isometric_${name}_${stamp}.png`;
-    document.body.appendChild(a); a.click(); a.remove();
+  function restore() {
+    renderer.setRenderTarget(null);
+    rt.dispose();
+    cubeGroup.position.copy(prev.cubePos);
+    cubeGroup.quaternion.copy(prev.cubeQuat);
+    sphereGroup.visible = prev.sphereOn;
+    scene.background    = prev.sceneBg;
+    camera.position.copy(prev.cameraPos);
+    camera.rotation.copy(prev.cameraRot);
+    camera.zoom = prev.cameraZoom;
+    camera.left = prev.frustum.left;  camera.right  = prev.frustum.right;
+    camera.top  = prev.frustum.top;   camera.bottom = prev.frustum.bottom;
+    camera.updateProjectionMatrix();
+    controls.target.copy(prev.controlTgt);
+    renderer.setClearColor(0x0a0a14, prev.rendererClear);
+    compositeAll();
   }
 
-  // ── Layer 1: map ─────────────────────────────────────────────────────────────
-  overlayMeshes.forEach(m => m.visible = false);
-  compositeOverlay(() => {});           // clear overlay canvases
-  download(renderCropped(), 'map');
-  overlayMeshes.forEach(m => m.visible = true);
-
-  // ── Layer 2: graticule lines ──────────────────────────────────────────────────
-  faceMeshes.forEach(m => m.visible = false);
-  compositeOverlay((ctx, f, N) => {
-    if (gratState.enabled) drawGraticule(ctx, f, N, gratState);
-  });
-  download(renderCropped(), 'graticule');
-  faceMeshes.forEach(m => m.visible = true);
-
-  // ── Layer 3: eclipse path (geometry + reflector rays) ─────────────────────────
-  faceMeshes.forEach(m => m.visible = false);
-  compositeOverlay((ctx, f, N) => {
-    for (const ec of eclipseState)
-      if (ec.geometry) drawEclipseGeometry(ctx, f, N, ec.geometry, ec);
-    if (reflState.enabled) {
-      for (const ec of eclipseState) {
-        if (!ec.reflectorRays) continue;
-        const rayOpts = { stroke: '#000000', width: 1, alpha: 0.7 };
-        for (const ray of ec.reflectorRays) drawPolylineOnFace(ctx, f, ray, N, rayOpts);
-        if (ec.centerlines) {
-          const cOpts = { stroke: '#ff3050', width: 2, alpha: 0.9 };
-          for (const cl of ec.centerlines)
-            if (cl.length > 1) drawPolylineOnFace(ctx, f, cl, N, cOpts);
-        }
-      }
-    }
-  });
-  download(renderCropped(), 'eclipse_path');
-  faceMeshes.forEach(m => m.visible = true);
-
-  // ── Layer 4: graticule cells ──────────────────────────────────────────────────
-  faceMeshes.forEach(m => m.visible = false);
-  compositeOverlay((ctx, f, N) => {
-    for (const ec of eclipseState) {
-      if (!ec.touchedCells) continue;
-      for (const cell of ec.touchedCells[f])
-        drawGraticuleCellOnFace(ctx, f, cell.lonIdx, cell.latIdx, gratState.step, N,
-          { fill: ec.fill + '22', stroke: ec.fill, width: 2, alpha: 0.5 });
-    }
-  });
-  download(renderCropped(), 'cells');
-  faceMeshes.forEach(m => m.visible = true);
-
-  // ── Cleanup & restore ─────────────────────────────────────────────────────────
-  renderer.setRenderTarget(null);
-  rt.dispose();
-  cubeGroup.position.copy(prev.cubePos);
-  sphereGroup.visible = prev.sphereOn;
-  scene.background    = prev.sceneBg;
-  camera.position.copy(prev.cameraPos);
-  camera.rotation.copy(prev.cameraRot);
-  camera.zoom         = prev.cameraZoom;
-  camera.left = prev.frustum.left;  camera.right  = prev.frustum.right;
-  camera.top  = prev.frustum.top;   camera.bottom = prev.frustum.bottom;
-  camera.updateProjectionMatrix();
-  controls.target.copy(prev.controlTgt);
-  renderer.setClearColor(0x0a0a14, prev.rendererClear);
-  compositeAll();
+  return { renderCropped, restore };
 }
 
-$('btn-export-iso').addEventListener('click', exportIsometric);
+function downloadBlob(content, mime, name) {
+  const blob = new Blob([content], { type: mime });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function downloadCanvasPng(canvas2d, name) {
+  const a = document.createElement('a');
+  a.href = canvas2d.toDataURL('image/png');
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function exportIsoMapAndGraticule() {
+  const size = parseInt($('composite-size').value) || 2048;
+  const cornerIdx = getSelectedCorner();
+  const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+  const ctx = setupIsometricRender(cornerIdx, size);
+
+  // Map PNG: hide overlays, clear the overlay canvases.
+  overlayMeshes.forEach(m => m.visible = false);
+  compositeOverlay(() => {});
+  downloadCanvasPng(ctx.renderCropped(), `iso_corner${cornerIdx}_map_${stamp}.png`);
+  overlayMeshes.forEach(m => m.visible = true);
+
+  // Graticule SVG: built directly from gratState. Scale matches PNG (1 cube
+  // unit = size/(2·half) pixels), so the SVG hexagon is the same size as the
+  // PNG crop box.
+  const N = faceOverlay[0].width;
+  const svgScale = size / (2 * FRUSTUM_HALF);
+  const svg = buildIsoGraticuleSvg(N, gratState, svgScale, cornerIdx);
+  downloadBlob(svg, 'image/svg+xml', `iso_corner${cornerIdx}_graticule_${stamp}.svg`);
+
+  ctx.restore();
+}
+
+async function buildEclipseMetadata(cornerIdx) {
+  const eclipses = [];
+  for (const ec of eclipseState) {
+    let r = null, series = null;
+    try {
+      const records = await loadSarosBin(ec.saros);
+      r = records[ec.pos] ?? null;
+      const dates = records.map(rec => rec.datetime_utc).filter(Boolean);
+      series = {
+        saros: ec.saros,
+        total_eclipses: records.length,
+        first_datetime: dates[0] ?? null,
+        last_datetime: dates[dates.length - 1] ?? null,
+        position_in_series: ec.pos,
+      };
+    } catch { /* keep r=null, series=null */ }
+
+    eclipses.push({
+      key: ec.key,
+      saros: ec.saros,
+      pos: ec.pos,
+      type: r?.type ?? ec.type ?? null,
+      datetime_utc: r?.datetime_utc ?? null,
+      latitude: r?.latitude ?? null,
+      longitude: r?.longitude ?? null,
+      magnitude: r?.magnitude ?? null,
+      gamma: r?.gamma ?? null,
+      central_duration: r?.central_duration ?? null,
+      central_width_km: r?.central_width_km ?? null,
+      sun_altitude: r?.sun_altitude ?? null,
+      saros_series: series,
+    });
+  }
+
+  const sx = (cornerIdx & 1) ? 1 : -1;
+  const sy = (cornerIdx & 2) ? 1 : -1;
+  const sz = (cornerIdx & 4) ? 1 : -1;
+  return {
+    generated_at: new Date().toISOString(),
+    corner: {
+      index: cornerIdx,
+      label: CORNER_LABELS[cornerIdx],
+      position: [sx, sy, sz],
+      visible_faces: CORNER_VISIBLE_FACES[cornerIdx],
+    },
+    graticule: { enabled: gratState.enabled, step_deg: gratState.step },
+    eclipses,
+  };
+}
+
+// Overlay drawers — extracted so the path + cells passes are identical across
+// the per-corner export and the all-corners ZIP.
+function drawPathOverlay(c, f, N) {
+  for (const ec of eclipseState)
+    if (ec.geometry) drawEclipseGeometry(c, f, N, ec.geometry, ec);
+  if (reflState.enabled) {
+    for (const ec of eclipseState) {
+      if (!ec.reflectorRays) continue;
+      const rayOpts = { stroke: '#000000', width: 1, alpha: 0.7 };
+      for (const ray of ec.reflectorRays) drawPolylineOnFace(c, f, ray, N, rayOpts);
+      if (ec.centerlines) {
+        const cOpts = { stroke: '#ff3050', width: 2, alpha: 0.9 };
+        for (const cl of ec.centerlines)
+          if (cl.length > 1) drawPolylineOnFace(c, f, cl, N, cOpts);
+      }
+    }
+  }
+}
+function drawCellsOverlay(c, f, N) {
+  for (const ec of eclipseState) {
+    if (!ec.touchedCells) continue;
+    for (const cell of ec.touchedCells[f])
+      drawGraticuleCellOnFace(c, f, cell.lonIdx, cell.latIdx, gratState.step, N,
+        { fill: ec.fill + '22', stroke: ec.fill, width: 2, alpha: 0.5 });
+  }
+}
+
+// Render an overlay-only frame (map hidden, overlay drawer applied).
+function renderOverlayCropped(ctx, drawer) {
+  faceMeshes.forEach(m => m.visible = false);
+  compositeOverlay(drawer);
+  const out = ctx.renderCropped();
+  faceMeshes.forEach(m => m.visible = true);
+  return out;
+}
+
+async function canvasToPngBytes(canvas2d) {
+  return new Promise((resolve) => {
+    canvas2d.toBlob(async (blob) =>
+      resolve(new Uint8Array(await blob.arrayBuffer())), 'image/png');
+  });
+}
+
+async function exportIsoPathAndCells() {
+  if (!eclipseState.length) { alert('Load an eclipse first.'); return; }
+  const size = parseInt($('composite-size').value) || 2048;
+  const cornerIdx = getSelectedCorner();
+  const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+  const ctx = setupIsometricRender(cornerIdx, size);
+
+  downloadCanvasPng(renderOverlayCropped(ctx, drawPathOverlay),
+    `iso_corner${cornerIdx}_path_${stamp}.png`);
+  downloadCanvasPng(renderOverlayCropped(ctx, drawCellsOverlay),
+    `iso_corner${cornerIdx}_cells_${stamp}.png`);
+
+  const meta = await buildEclipseMetadata(cornerIdx);
+  downloadBlob(JSON.stringify(meta, null, 2), 'application/json',
+    `iso_corner${cornerIdx}_metadata_${stamp}.json`);
+
+  ctx.restore();
+}
+
+// All 8 perspectives of the eclipse path bundled into a single ZIP.
+async function exportAllPerspectivesZip() {
+  if (!eclipseState.length) { alert('Load an eclipse first.'); return; }
+  const size = parseInt($('composite-size').value) || 2048;
+  const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+  const files = [];
+
+  for (let cornerIdx = 0; cornerIdx < 8; cornerIdx++) {
+    const ctx = setupIsometricRender(cornerIdx, size);
+    const png = renderOverlayCropped(ctx, drawPathOverlay);
+    const bytes = await canvasToPngBytes(png);
+    files.push({ name: `iso_corner${cornerIdx}_path.png`, data: bytes });
+    ctx.restore();
+  }
+
+  // Single metadata covering all corners.
+  const meta = await buildEclipseMetadata(0);
+  meta.corner = null;
+  meta.corners_included = [
+    { index: 0, label: CORNER_LABELS[0], visible_faces: CORNER_VISIBLE_FACES[0] },
+    { index: 1, label: CORNER_LABELS[1], visible_faces: CORNER_VISIBLE_FACES[1] },
+    { index: 2, label: CORNER_LABELS[2], visible_faces: CORNER_VISIBLE_FACES[2] },
+    { index: 3, label: CORNER_LABELS[3], visible_faces: CORNER_VISIBLE_FACES[3] },
+    { index: 4, label: CORNER_LABELS[4], visible_faces: CORNER_VISIBLE_FACES[4] },
+    { index: 5, label: CORNER_LABELS[5], visible_faces: CORNER_VISIBLE_FACES[5] },
+    { index: 6, label: CORNER_LABELS[6], visible_faces: CORNER_VISIBLE_FACES[6] },
+    { index: 7, label: CORNER_LABELS[7], visible_faces: CORNER_VISIBLE_FACES[7] },
+  ];
+  files.push({
+    name: 'metadata.json',
+    data: new TextEncoder().encode(JSON.stringify(meta, null, 2)),
+  });
+
+  const zip = buildZip(files);
+  const url = URL.createObjectURL(zip);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `iso_all_perspectives_${stamp}.zip`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+$('btn-export-map-grat').addEventListener('click', exportIsoMapAndGraticule);
+$('btn-export-path-cells').addEventListener('click', exportIsoPathAndCells);
+$('btn-export-all-corners').addEventListener('click', exportAllPerspectivesZip);
 
 // ── SVG export ────────────────────────────────────────────────────────────────
 function renderExportFaces() {
