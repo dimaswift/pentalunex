@@ -1,7 +1,6 @@
 // UI wiring entry point. Owns the mutable app state (graticule settings,
 // eclipse list) and connects DOM events to the scene + overlay modules.
 import * as THREE from 'three';
-import { faceXYToLatLon } from '../csc.js';
 import { FACE_NAMES } from './projection.js';
 import { createScene } from './scene.js';
 import { TILE_SOURCES, renderFaceTiles } from './map-tiles.js';
@@ -9,10 +8,10 @@ import { renderFaceSolid, getCoastlineData } from './map-solid.js';
 import { drawGraticule } from './graticule.js';
 import { getCellAtPixel, drawGraticuleCellOnFace } from './graticule-cells.js';
 import { loadSarosBin, ensureSolarDB, drawEclipseGeometry, getCellsByFace } from './eclipse-overlay.js';
-import { exportFaces as exportFacesSvg, buildIsoGraticuleSvg } from './svg-export.js';
+import { exportFaces as exportFacesSvg, buildIsoGraticuleSvg, buildIsoFaceGraticuleSvg } from './svg-export.js';
 import { buildZip } from './zip.js';
 import { extractCenterlines, castReflectorRays } from './reflector.js';
-import { drawPolylineOnFace } from './projection.js';
+import { drawPolylineOnFace, faceXYToLonLat, setProjectionOffsets, getProjectionOffsets } from './projection.js';
 
 const $ = id => document.getElementById(id);
 
@@ -30,6 +29,7 @@ cubeGroup.position.x = 0;
 
 // ── App state ─────────────────────────────────────────────────────────────────
 const gratState = { enabled: false, step: 15, width: 1, color: '#ffffff', alpha: 0.5 };
+const projState = { lonOffset: 0, latOffset: 0, rollOffset: 0 };
 const reflState = { enabled: false, stepDeg: 2, lengthDeg: 120, side: +1 };
 const eclipseState = []; // [{ key, saros, pos, geometry, type, outline, fill, ... }]
 const cellHighlight = { face: null, lonIdx: null, latIdx: null };
@@ -88,10 +88,28 @@ function syncGraticule() {
   gratState.color = $('grat-color').value;
   gratState.alpha = parseFloat($('grat-alpha').value);
   $('grat-alpha-val').textContent = gratState.alpha.toFixed(2);
+  for (const ec of eclipseState)
+    if (ec.geometry) ec.touchedCells = getCellsByFace(ec.geometry, gratState.step);
   compositeAll();
 }
 ['grat-on','grat-step','grat-width','grat-color','grat-alpha']
   .forEach(id => $(id).addEventListener('input', syncGraticule));
+
+function syncProjectionOffsets() {
+  projState.lonOffset = parseFloat($('lon-offset').value) || 0;
+  projState.latOffset = parseFloat($('lat-offset').value) || 0;
+  projState.rollOffset = parseFloat($('roll-offset').value) || 0;
+  $('lon-offset-val').textContent = `${projState.lonOffset.toFixed(1)}°`;
+  $('lat-offset-val').textContent = `${projState.latOffset.toFixed(1)}°`;
+  $('roll-offset-val').textContent = `${projState.rollOffset.toFixed(1)}°`;
+  setProjectionOffsets(projState.lonOffset, projState.latOffset, projState.rollOffset);
+  for (const ec of eclipseState)
+    if (ec.geometry) ec.touchedCells = getCellsByFace(ec.geometry, gratState.step);
+  compositeAll();
+}
+['lon-offset','lat-offset','roll-offset']
+  .forEach(id => $(id).addEventListener('input', syncProjectionOffsets));
+syncProjectionOffsets();
 
 // ── Reflector controls ────────────────────────────────────────────────────────
 function syncReflector() {
@@ -626,9 +644,21 @@ const CORNER_VISIBLE_FACES = [
   [5, 3, 4], [5, 3, 2], [0, 3, 4], [0, 3, 2],
   [5, 1, 4], [5, 1, 2], [0, 1, 4], [0, 1, 2],
 ];
+const FACE_EDGE_DEFS = [
+  { name: 'top',    from: [-0.5,  0.5], to: [ 0.5,  0.5] },
+  { name: 'right',  from: [ 0.5,  0.5], to: [ 0.5, -0.5] },
+  { name: 'bottom', from: [ 0.5, -0.5], to: [-0.5, -0.5] },
+  { name: 'left',   from: [-0.5, -0.5], to: [-0.5,  0.5] },
+];
+const EDGE_NAMES = FACE_EDGE_DEFS.map(e => e.name);
 
 function getSelectedCorner() {
   return parseInt($('iso-corner').value) || 0;
+}
+
+function getSelectedIsoFace() {
+  const value = $('iso-face').value;
+  return value === 'all' ? null : parseInt(value);
 }
 
 function setCornerCamera(cornerIdx, distance, target) {
@@ -644,11 +674,97 @@ function setCornerCamera(cornerIdx, distance, target) {
   controls.target.copy(target);
 }
 
+function faceLocalToWorld(face, fx, fy) {
+  switch (face) {
+    case 0: return new THREE.Vector3( fx,  0.5, -fy);
+    case 1: return new THREE.Vector3( fx,  fy,   0.5);
+    case 2: return new THREE.Vector3( 0.5, fy,  -fx);
+    case 3: return new THREE.Vector3(-fx,  fy,  -0.5);
+    case 4: return new THREE.Vector3(-0.5, fy,   fx);
+    case 5: return new THREE.Vector3(-fx, -0.5, -fy);
+  }
+}
+
+function pointKey(p) {
+  return [p.x, p.y, p.z].map(v => v.toFixed(3)).join(',');
+}
+
+function edgeKey(a, b) {
+  return [pointKey(a), pointKey(b)].sort().join('|');
+}
+
+function vectorToArray(v) {
+  return [v.x, v.y, v.z];
+}
+
+function edgeWorld(face, edgeDef) {
+  return {
+    from: faceLocalToWorld(face, edgeDef.from[0], edgeDef.from[1]),
+    to: faceLocalToWorld(face, edgeDef.to[0], edgeDef.to[1]),
+  };
+}
+
+function buildCubeTopology() {
+  const directed = [];
+  for (let face = 0; face < FACE_NAMES.length; face++) {
+    for (const edge of FACE_EDGE_DEFS) {
+      const world = edgeWorld(face, edge);
+      directed.push({
+        face,
+        edge: edge.name,
+        key: edgeKey(world.from, world.to),
+        worldFrom: vectorToArray(world.from),
+        worldTo: vectorToArray(world.to),
+      });
+    }
+  }
+
+  const natural = [];
+  const mirror = [];
+  for (const a of directed) {
+    const b = directed.find(candidate =>
+      candidate !== a &&
+      candidate.key === a.key &&
+      candidate.worldFrom.join(',') === a.worldTo.join(',') &&
+      candidate.worldTo.join(',') === a.worldFrom.join(','));
+
+    natural.push({
+      type: 'natural',
+      from: { face: a.face, edge: a.edge, variant: 'normal' },
+      to: b ? { face: b.face, edge: b.edge, variant: 'normal' } : null,
+      edgeKey: a.key,
+      orientation: 'reversed',
+      placement: 'rotate_translate',
+    });
+
+    mirror.push({
+      type: 'mirror',
+      from: { face: a.face, edge: a.edge, variant: 'normal' },
+      to: { face: a.face, edge: a.edge, variant: 'mirror' },
+      edgeKey: a.key,
+      orientation: 'same',
+      placement: 'reflect_across_edge',
+    });
+  }
+
+  return {
+    edge_order: FACE_EDGE_DEFS.map(e => e.name),
+    faces: FACE_NAMES.map((name, face) => ({
+      face,
+      name,
+      edges: Object.fromEntries(directed
+        .filter(e => e.face === face)
+        .map(e => [e.edge, { edgeKey: e.key, worldFrom: e.worldFrom, worldTo: e.worldTo }])),
+    })),
+    bonds: { natural, mirror },
+  };
+}
+
 // Set up the offscreen render: hide sphere, recentre cube *in canonical
 // orientation* (autoOrientCube would otherwise rotate the cube to expose the
 // eclipse-relevant faces interactively — for export the camera alone moves),
 // set ortho frustum, position camera at the chosen corner.
-function setupIsometricRender(cornerIdx, size) {
+function setupIsometricRender(cornerIdx, size, opts = {}) {
   const prev = {
     cubePos:    cubeGroup.position.clone(),
     cubeQuat:   cubeGroup.quaternion.clone(),
@@ -673,12 +789,23 @@ function setupIsometricRender(cornerIdx, size) {
   camera.updateProjectionMatrix();
   scene.updateMatrixWorld(true);
 
-  // Crop box — projected bbox of the 8 cube corners.
+  // Crop box — projected bbox of either the whole cube or one selected face.
+  const cropPoints = [];
+  if (opts.faceIdx == null) {
+    for (let i = 0; i < 8; i++) {
+      cropPoints.push(new THREE.Vector3(
+        (i & 1) ? 0.5 : -0.5, (i & 2) ? 0.5 : -0.5, (i & 4) ? 0.5 : -0.5,
+      ).applyMatrix4(cubeGroup.matrixWorld));
+    }
+  } else {
+    const mesh = faceMeshes[opts.faceIdx];
+    for (const [x, y] of [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]])
+      cropPoints.push(new THREE.Vector3(x, y, 0).applyMatrix4(mesh.matrixWorld));
+  }
+
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (let i = 0; i < 8; i++) {
-    const v = new THREE.Vector3(
-      (i & 1) ? 0.5 : -0.5, (i & 2) ? 0.5 : -0.5, (i & 4) ? 0.5 : -0.5,
-    ).applyMatrix4(cubeGroup.matrixWorld).project(camera);
+  for (const point of cropPoints) {
+    const v = point.clone().project(camera);
     const px = (v.x + 1) * 0.5 * size;
     const py = (1 - v.y) * 0.5 * size;
     if (px < minX) minX = px; if (px > maxX) maxX = px;
@@ -730,7 +857,20 @@ function setupIsometricRender(cornerIdx, size) {
     compositeAll();
   }
 
-  return { renderCropped, restore };
+  function projectWorldToCrop(point) {
+    const v = point.clone().project(camera);
+    return [
+      (v.x + 1) * 0.5 * size - cropX,
+      (1 - v.y) * 0.5 * size - cropY,
+    ];
+  }
+
+  return {
+    renderCropped,
+    restore,
+    crop: { x: cropX, y: cropY, width: cropW, height: cropH, renderTargetY: rtY },
+    projectWorldToCrop,
+  };
 }
 
 function downloadBlob(content, mime, name) {
@@ -748,27 +888,50 @@ function downloadCanvasPng(canvas2d, name) {
   document.body.appendChild(a); a.click(); a.remove();
 }
 
+function renderIsoMapCropped(ctx, faceIdx) {
+  const prevFaces = faceMeshes.map(m => m.visible);
+  const prevOverlays = overlayMeshes.map(m => m.visible);
+
+  if (faceIdx != null)
+    faceMeshes.forEach(m => m.visible = m.userData.face === faceIdx);
+  overlayMeshes.forEach(m => m.visible = false);
+  compositeOverlay(() => {});
+
+  const out = ctx.renderCropped();
+
+  faceMeshes.forEach((m, i) => m.visible = prevFaces[i]);
+  overlayMeshes.forEach((m, i) => m.visible = prevOverlays[i]);
+  return out;
+}
+
 function exportIsoMapAndGraticule() {
   const size = parseInt($('composite-size').value) || 2048;
   const cornerIdx = getSelectedCorner();
+  const faceIdx = getSelectedIsoFace();
+  if (faceIdx != null && !CORNER_VISIBLE_FACES[cornerIdx].includes(faceIdx)) {
+    alert(`Face ${faceIdx} (${FACE_NAMES[faceIdx]}) is not visible from corner ${cornerIdx}.`);
+    return;
+  }
+
   const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-  const ctx = setupIsometricRender(cornerIdx, size);
+  const ctx = setupIsometricRender(cornerIdx, size, { faceIdx });
 
-  // Map PNG: hide overlays, clear the overlay canvases.
-  overlayMeshes.forEach(m => m.visible = false);
-  compositeOverlay(() => {});
-  downloadCanvasPng(ctx.renderCropped(), `iso_corner${cornerIdx}_map_${stamp}.png`);
-  overlayMeshes.forEach(m => m.visible = true);
+  try {
+    // Map PNG: hide overlays, clear the overlay canvases.
+    const fileScope = faceIdx == null ? `iso_corner${cornerIdx}` : `iso_corner${cornerIdx}_face${faceIdx}`;
+    downloadCanvasPng(renderIsoMapCropped(ctx, faceIdx), `${fileScope}_map_${stamp}.png`);
 
-  // Graticule SVG: built directly from gratState. Scale matches PNG (1 cube
-  // unit = size/(2·half) pixels), so the SVG hexagon is the same size as the
-  // PNG crop box.
-  const N = faceOverlay[0].width;
-  const svgScale = size / (2 * FRUSTUM_HALF);
-  const svg = buildIsoGraticuleSvg(N, gratState, svgScale, cornerIdx);
-  downloadBlob(svg, 'image/svg+xml', `iso_corner${cornerIdx}_graticule_${stamp}.svg`);
-
-  ctx.restore();
+    // Graticule SVG: built directly from gratState. Scale matches PNG (1 cube
+    // unit = size/(2·half) pixels), so the SVG crop box matches the PNG crop.
+    const N = faceOverlay[0].width;
+    const svgScale = size / (2 * FRUSTUM_HALF);
+    const svg = faceIdx == null
+      ? buildIsoGraticuleSvg(N, gratState, svgScale, cornerIdx)
+      : buildIsoFaceGraticuleSvg(N, gratState, svgScale, cornerIdx, faceIdx);
+    downloadBlob(svg, 'image/svg+xml', `${fileScope}_graticule_${stamp}.svg`);
+  } finally {
+    ctx.restore();
+  }
 }
 
 async function buildEclipseMetadata(cornerIdx) {
@@ -817,6 +980,7 @@ async function buildEclipseMetadata(cornerIdx) {
       visible_faces: CORNER_VISIBLE_FACES[cornerIdx],
     },
     graticule: { enabled: gratState.enabled, step_deg: gratState.step },
+    projection_offset: getProjectionOffsets(),
     eclipses,
   };
 }
@@ -864,6 +1028,212 @@ async function canvasToPngBytes(canvas2d) {
   });
 }
 
+function textBytes(text) {
+  return new TextEncoder().encode(text);
+}
+
+function round3(v) {
+  return Number(v.toFixed(3));
+}
+
+function point2Meta(p) {
+  return p.map(round3);
+}
+
+function edge2Meta(from, to) {
+  const dx = to[0] - from[0], dy = to[1] - from[1];
+  return {
+    from: point2Meta(from),
+    to: point2Meta(to),
+    vector: point2Meta([dx, dy]),
+    midpoint: point2Meta([(from[0] + to[0]) / 2, (from[1] + to[1]) / 2]),
+    length: round3(Math.hypot(dx, dy)),
+    angle_deg: round3(Math.atan2(dy, dx) * 180 / Math.PI),
+  };
+}
+
+function sourceFaceCorners(ctx, faceIdx) {
+  return {
+    top_left: ctx.projectWorldToCrop(faceLocalToWorld(faceIdx, -0.5,  0.5)),
+    top_right: ctx.projectWorldToCrop(faceLocalToWorld(faceIdx,  0.5,  0.5)),
+    bottom_right: ctx.projectWorldToCrop(faceLocalToWorld(faceIdx,  0.5, -0.5)),
+    bottom_left: ctx.projectWorldToCrop(faceLocalToWorld(faceIdx, -0.5, -0.5)),
+  };
+}
+
+function rotatePoint(p, angleRad) {
+  const c = Math.cos(angleRad), s = Math.sin(angleRad);
+  return [p[0] * c - p[1] * s, p[0] * s + p[1] * c];
+}
+
+function transformPointForFrame(p, frame) {
+  const r = rotatePoint(p, frame.angleRad);
+  return [r[0] + frame.translate[0] + frame.pad[0], r[1] + frame.translate[1] + frame.pad[1]];
+}
+
+function edgeSourcePoints(corners, edgeName) {
+  switch (edgeName) {
+    case 'top': return [corners.top_left, corners.top_right];
+    case 'right': return [corners.top_right, corners.bottom_right];
+    case 'bottom': return [corners.bottom_right, corners.bottom_left];
+    case 'left': return [corners.bottom_left, corners.top_left];
+  }
+}
+
+function getVisualPrimaryEdge(corners) {
+  const candidates = EDGE_NAMES.map(name => {
+    const [from, to] = edgeSourcePoints(corners, name);
+    return { name, midX: (from[0] + to[0]) / 2, midY: (from[1] + to[1]) / 2 };
+  });
+  candidates.sort((a, b) => (a.midX - b.midX) || (a.midY - b.midY));
+  return candidates[0].name;
+}
+
+function edgeOrderFromPrimary(primaryEdge) {
+  const i = EDGE_NAMES.indexOf(primaryEdge);
+  return [...EDGE_NAMES.slice(i), ...EDGE_NAMES.slice(0, i)];
+}
+
+function buildRotationFrame(corners, targetSize = null) {
+  const primaryEdge = getVisualPrimaryEdge(corners);
+  const [from, to] = edgeSourcePoints(corners, primaryEdge);
+  const angleRad = -Math.PI / 2 - Math.atan2(to[1] - from[1], to[0] - from[0]);
+  const rotated = Object.fromEntries(Object.entries(corners)
+    .map(([name, point]) => [name, rotatePoint(point, angleRad)]));
+  const xs = Object.values(rotated).map(p => p[0]);
+  const ys = Object.values(rotated).map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const tightWidth = Math.ceil(maxX - minX);
+  const tightHeight = Math.ceil(maxY - minY);
+  const width = targetSize?.width ?? tightWidth;
+  const height = targetSize?.height ?? tightHeight;
+  return {
+    primaryEdge,
+    edgeOrder: edgeOrderFromPrimary(primaryEdge),
+    angleRad,
+    angleDeg: angleRad * 180 / Math.PI,
+    translate: [-minX, -minY],
+    pad: [(width - tightWidth) / 2, (height - tightHeight) / 2],
+    tightWidth,
+    tightHeight,
+    width,
+    height,
+  };
+}
+
+function normalizeCanvasByRotation(canvas, frame) {
+  const out = document.createElement('canvas');
+  out.width = frame.width;
+  out.height = frame.height;
+  const c = out.getContext('2d');
+  c.translate(frame.translate[0] + frame.pad[0], frame.translate[1] + frame.pad[1]);
+  c.rotate(frame.angleRad);
+  c.drawImage(canvas, 0, 0);
+  return out;
+}
+
+function buildIsoTileAssetMetadata(cornerIdx, faceIdx, ctx, mapPath, graticulePath, frame) {
+  const corners = sourceFaceCorners(ctx, faceIdx);
+  const edgeOrder = frame.edgeOrder;
+  const polygon = ['top_left', 'top_right', 'bottom_right', 'bottom_left']
+    .map(name => ({ name, point: point2Meta(transformPointForFrame(corners[name], frame)) }));
+
+  const edges = {};
+  const indexedEdges = [];
+  for (const edge of FACE_EDGE_DEFS) {
+    const world = edgeWorld(faceIdx, edge);
+    const from = transformPointForFrame(ctx.projectWorldToCrop(world.from), frame);
+    const to = transformPointForFrame(ctx.projectWorldToCrop(world.to), frame);
+    const index = edgeOrder.indexOf(edge.name);
+    edges[edge.name] = {
+      index,
+      edgeKey: edgeKey(world.from, world.to),
+      worldFrom: vectorToArray(world.from).map(round3),
+      worldTo: vectorToArray(world.to).map(round3),
+      image: edge2Meta(from, to),
+    };
+    indexedEdges[index] = { index, semantic_edge: edge.name, ...edges[edge.name] };
+  }
+
+  return {
+    id: `corner${cornerIdx}_face${faceIdx}`,
+    corner: cornerIdx,
+    corner_label: CORNER_LABELS[cornerIdx],
+    face: faceIdx,
+    face_name: FACE_NAMES[faceIdx],
+    variant: 'normal',
+    primary_edge: frame.primaryEdge,
+    edge_order: edgeOrder,
+    rotation_normalization: {
+      angle_deg: round3(frame.angleDeg),
+      tight_width: frame.tightWidth,
+      tight_height: frame.tightHeight,
+    },
+    files: { map: mapPath, graticule: graticulePath },
+    image: { width: frame.width, height: frame.height },
+    crop: { x: ctx.crop.x, y: ctx.crop.y, width: ctx.crop.width, height: ctx.crop.height },
+    polygon,
+    edges,
+    indexed_edges: indexedEdges,
+    variants: [
+      { id: `corner${cornerIdx}_face${faceIdx}`, parity: 1, transform: 'identity' },
+      {
+        id: `corner${cornerIdx}_face${faceIdx}_mirror`,
+        parity: -1,
+        source: `corner${cornerIdx}_face${faceIdx}`,
+        transform: 'runtime_reflection',
+      },
+    ],
+  };
+}
+
+function buildTileSandboxManifest(size, assets) {
+  return {
+    version: 1,
+    generated_at: new Date().toISOString(),
+    export: {
+      kind: 'iso_tile_sandbox',
+      render_size: size,
+      frustum_half: FRUSTUM_HALF,
+      asset_count: assets.length,
+      corners: CORNER_LABELS.map((label, index) => ({
+        index,
+        label,
+        visible_faces: CORNER_VISIBLE_FACES[index],
+      })),
+    },
+    graticule: {
+      enabled: gratState.enabled,
+      step_deg: gratState.step,
+      width: gratState.width,
+      color: gratState.color,
+      alpha: gratState.alpha,
+    },
+    projection_offset: getProjectionOffsets(),
+    variants: {
+      normal: { parity: 1, description: 'Rendered shard as exported.' },
+      mirror: {
+        parity: -1,
+        description: 'Logical mirrored variant. Reflect the source shard across the chosen bond edge at placement time.',
+      },
+    },
+    canonical_orientation: {
+      primary_edge: 'visual left edge after the original isometric render',
+      edge_index_order: 'starts at primary_edge, then follows top/right/bottom/left clockwise order',
+      edge_0: 'bottom-left corner to top-left corner',
+      winding: 'clockwise',
+      method: 'rotation-only post-process; no affine skew or reprojection',
+    },
+    placement: {
+      natural: 'Match equal edgeKey values, rotate candidate so its edge vector is opposite the anchor edge vector, then translate edge midpoints together.',
+      mirror: 'Reflect the source shard across the anchor edge line. The bonded edge keeps the same edgeKey and image-space line.',
+    },
+    topology: buildCubeTopology(),
+    assets,
+  };
+}
+
 async function exportIsoPathAndCells() {
   if (!eclipseState.length) { alert('Load an eclipse first.'); return; }
   const size = parseInt($('composite-size').value) || 2048;
@@ -881,6 +1251,84 @@ async function exportIsoPathAndCells() {
     `iso_corner${cornerIdx}_metadata_${stamp}.json`);
 
   ctx.restore();
+}
+
+async function exportTileSandboxZip() {
+  const size = parseInt($('composite-size').value) || 2048;
+  const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+  const files = [];
+  const assets = [];
+  const N = faceOverlay[0].width;
+  const svgScale = size / (2 * FRUSTUM_HALF);
+  const loading  = $('loading');
+  const progress = $('progress');
+  const title    = $('loading-title');
+  let done = 0;
+
+  loading.style.display = 'block';
+  title.textContent = 'Exporting tile sandbox…';
+
+  try {
+    progress.textContent = 'Measuring shard rotations…';
+    const jobs = [];
+    let targetWidth = 0, targetHeight = 0;
+    for (let cornerIdx = 0; cornerIdx < CORNER_VISIBLE_FACES.length; cornerIdx++) {
+      for (const faceIdx of CORNER_VISIBLE_FACES[cornerIdx]) {
+        const ctx = setupIsometricRender(cornerIdx, size, { faceIdx });
+        try {
+          const frame = buildRotationFrame(sourceFaceCorners(ctx, faceIdx));
+          targetWidth = Math.max(targetWidth, frame.tightWidth);
+          targetHeight = Math.max(targetHeight, frame.tightHeight);
+          jobs.push({ cornerIdx, faceIdx });
+        } finally {
+          ctx.restore();
+        }
+      }
+    }
+
+    for (const { cornerIdx, faceIdx } of jobs) {
+      progress.textContent = `Rendering shard ${done + 1}/${jobs.length} — corner ${cornerIdx}, face ${faceIdx}`;
+      const fileStem = `tiles/iso_corner${cornerIdx}_face${faceIdx}`;
+      const mapPath = `${fileStem}_map.png`;
+      const graticulePath = `${fileStem}_graticule.svg`;
+      const ctx = setupIsometricRender(cornerIdx, size, { faceIdx });
+
+      try {
+        const map = renderIsoMapCropped(ctx, faceIdx);
+        const sourceCorners = sourceFaceCorners(ctx, faceIdx);
+        const frame = buildRotationFrame(sourceCorners, { width: targetWidth, height: targetHeight });
+        const normalizedMap = normalizeCanvasByRotation(map, frame);
+        files.push({ name: mapPath, data: await canvasToPngBytes(normalizedMap) });
+
+        const svg = buildIsoFaceGraticuleSvg(N, gratState, svgScale, cornerIdx, faceIdx, {
+          rotate: frame,
+        });
+        files.push({ name: graticulePath, data: textBytes(svg) });
+
+        assets.push(buildIsoTileAssetMetadata(cornerIdx, faceIdx, ctx, mapPath, graticulePath, frame));
+        done++;
+      } finally {
+        ctx.restore();
+      }
+    }
+
+    progress.textContent = 'Writing manifest…';
+    files.push({
+      name: 'manifest.json',
+      data: textBytes(JSON.stringify(buildTileSandboxManifest(size, assets), null, 2)),
+    });
+
+    progress.textContent = 'Building zip…';
+    const zip = buildZip(files);
+    const url = URL.createObjectURL(zip);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `iso_tile_sandbox_${stamp}.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } finally {
+    loading.style.display = 'none';
+  }
 }
 
 // All 8 perspectives of the eclipse path bundled into a single ZIP.
@@ -927,6 +1375,7 @@ async function exportAllPerspectivesZip() {
 
 $('btn-export-map-grat').addEventListener('click', exportIsoMapAndGraticule);
 $('btn-export-path-cells').addEventListener('click', exportIsoPathAndCells);
+$('btn-export-tile-sandbox').addEventListener('click', exportTileSandboxZip);
 $('btn-export-all-corners').addEventListener('click', exportAllPerspectivesZip);
 
 // ── SVG export ────────────────────────────────────────────────────────────────
@@ -1031,7 +1480,7 @@ canvas.addEventListener('mousemove', e => {
     const face = hit.object.userData.face;
     const xF   = hit.uv.x * 2 - 1;
     const yF   = hit.uv.y * 2 - 1;
-    const { lat, lon } = faceXYToLatLon(face, xF, yF);
+    const { lat, lon } = faceXYToLonLat(face, xF, yF);
 
     // Convert UV coordinates to pixel coordinates and detect cell
     const N = faceOverlay[face].width;

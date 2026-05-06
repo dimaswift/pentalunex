@@ -61,6 +61,16 @@ class FacePoint:
         return (1.0 - self.y) * 0.5
 
 
+@dataclass(frozen=True)
+class ProjectionOffset:
+    lon: float = 0.0
+    lat: float = 0.0
+    roll: float = 0.0
+
+
+NO_OFFSET = ProjectionOffset()
+
+
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
@@ -83,6 +93,57 @@ def lonlat_to_vec3(lon: float, lat: float) -> tuple[float, float, float]:
     lo = lon * DEG
     c = math.cos(la)
     return (c * math.cos(lo), c * math.sin(lo), math.sin(la))
+
+
+def _projection_offset(offset: ProjectionOffset | Sequence[float] | None) -> ProjectionOffset:
+    if offset is None:
+        return NO_OFFSET
+    if isinstance(offset, ProjectionOffset):
+        return offset
+    values = list(offset)
+    if len(values) == 2:
+        return ProjectionOffset(float(values[0]), float(values[1]), 0.0)
+    if len(values) == 3:
+        return ProjectionOffset(float(values[0]), float(values[1]), float(values[2]))
+    raise ValueError("projection offset must be (lon, lat) or (lon, lat, roll)")
+
+
+def rotate_x(p: Sequence[float], deg: float) -> tuple[float, float, float]:
+    a = deg * DEG
+    c = math.cos(a)
+    s = math.sin(a)
+    return (p[0], p[1] * c - p[2] * s, p[1] * s + p[2] * c)
+
+
+def rotate_y(p: Sequence[float], deg: float) -> tuple[float, float, float]:
+    a = deg * DEG
+    c = math.cos(a)
+    s = math.sin(a)
+    return (p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c)
+
+
+def rotate_z(p: Sequence[float], deg: float) -> tuple[float, float, float]:
+    a = deg * DEG
+    c = math.cos(a)
+    s = math.sin(a)
+    return (p[0] * c - p[1] * s, p[0] * s + p[1] * c, p[2])
+
+
+def oriented_lonlat_to_vec3(
+    lon: float,
+    lat: float,
+    offset: ProjectionOffset | Sequence[float] | None = None,
+) -> tuple[float, float, float]:
+    o = _projection_offset(offset)
+    return rotate_x(rotate_y(rotate_z(lonlat_to_vec3(lon, lat), o.lon), o.lat), o.roll)
+
+
+def oriented_vec3_to_lonlat(
+    p: Sequence[float],
+    offset: ProjectionOffset | Sequence[float] | None = None,
+) -> tuple[float, float]:
+    o = _projection_offset(offset)
+    return vec3_to_lonlat(rotate_z(rotate_y(rotate_x(p, -o.roll), -o.lat), -o.lon))
 
 
 def vec3_to_lonlat(p: Sequence[float]) -> tuple[float, float]:
@@ -145,15 +206,25 @@ def face_xy_to_vec3(face: int, x: float, y: float) -> tuple[float, float, float]
     return normalize3(from_face_xyz(face, (x, y, 1.0)))
 
 
-def lonlat_to_face_xy(lon: float, lat: float, face: int | None = None) -> FacePoint:
-    p = lonlat_to_vec3(lon, lat)
+def lonlat_to_face_xy(
+    lon: float,
+    lat: float,
+    face: int | None = None,
+    offset: ProjectionOffset | Sequence[float] | None = None,
+) -> FacePoint:
+    p = oriented_lonlat_to_vec3(lon, lat, offset)
     face_idx = owning_face_for_vec3(p) if face is None else face
     x, y = vec3_to_face_xy(face_idx, p)
     return FacePoint(face_idx, x, y)
 
 
-def face_xy_to_lonlat(face: int, x: float, y: float) -> tuple[float, float]:
-    return vec3_to_lonlat(face_xy_to_vec3(face, x, y))
+def face_xy_to_lonlat(
+    face: int,
+    x: float,
+    y: float,
+    offset: ProjectionOffset | Sequence[float] | None = None,
+) -> tuple[float, float]:
+    return oriented_vec3_to_lonlat(face_xy_to_vec3(face, x, y), offset)
 
 
 def face_xy_to_pixel(x: float, y: float, size: float) -> tuple[float, float]:

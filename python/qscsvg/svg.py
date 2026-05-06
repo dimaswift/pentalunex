@@ -6,17 +6,19 @@ import html
 import math
 from typing import Any, Iterable, Sequence
 
-try:
-    from shapely.geometry import LineString, Polygon, box
-    from shapely.validation import make_valid
-except Exception:  # pragma: no cover
-    LineString = None
-    Polygon = None
-    box = None
-    make_valid = None
+LineString = None
+Polygon = None
+box = None
+make_valid = None
 
 from .cells import CellId, cell_ring_face_xy, cells_for_face, validate_cell
-from .geometry import densify_lonlat_segment, face_xy_to_pixel, lonlat_to_vec3, to_face_xyz
+from .geometry import (
+    ProjectionOffset,
+    densify_lonlat_segment,
+    face_xy_to_pixel,
+    oriented_lonlat_to_vec3,
+    to_face_xyz,
+)
 
 
 FACE_CLIP_EPS = 1e-8
@@ -25,6 +27,23 @@ CLASSIC_CROSS_LAYOUT = (
     (4, 1, 2, 3),
     (None, 5, None, None),
 )
+
+
+def _require_shapely(reason: str) -> None:
+    global LineString, Polygon, box, make_valid
+    if Polygon is not None and LineString is not None and box is not None:
+        return
+    try:
+        from shapely.geometry import LineString as shapely_linestring
+        from shapely.geometry import Polygon as shapely_polygon
+        from shapely.geometry import box as shapely_box
+        from shapely.validation import make_valid as shapely_make_valid
+    except Exception as exc:  # pragma: no cover - depends on optional dependency.
+        raise RuntimeError(reason) from exc
+    LineString = shapely_linestring
+    Polygon = shapely_polygon
+    box = shapely_box
+    make_valid = shapely_make_valid
 
 
 def _path(points: Sequence[Sequence[float]], close: bool = True, precision: int = 2) -> str:
@@ -78,10 +97,11 @@ def _project_lonlat_ring_to_face(
     face: int,
     ring: Sequence[Sequence[float]],
     max_step_deg: float,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> list[tuple[float, float]]:
     out: list[tuple[float, float]] = []
     for lon, lat in _densify_ring(ring, max_step_deg):
-        p = to_face_xyz(face, lonlat_to_vec3(lon, lat))
+        p = to_face_xyz(face, oriented_lonlat_to_vec3(lon, lat, projection_offset))
         if p[2] <= FACE_CLIP_EPS:
             continue
         x = p[0] / p[2]
@@ -98,9 +118,9 @@ def _face_polygons_from_geojson(
     face: int,
     *,
     max_step_deg: float,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ):
-    if Polygon is None or box is None:
-        raise RuntimeError("eclipse path SVG rendering requires shapely")
+    _require_shapely("eclipse path SVG rendering requires shapely")
 
     gtype = geometry.get("type")
     coords = geometry.get("coordinates")
@@ -116,10 +136,10 @@ def _face_polygons_from_geojson(
     for poly in polygons:
         if not poly:
             continue
-        shell = _project_lonlat_ring_to_face(face, poly[0], max_step_deg)
+        shell = _project_lonlat_ring_to_face(face, poly[0], max_step_deg, projection_offset)
         holes = [
             hole for ring in poly[1:]
-            if len(hole := _project_lonlat_ring_to_face(face, ring, max_step_deg)) >= 4
+            if len(hole := _project_lonlat_ring_to_face(face, ring, max_step_deg, projection_offset)) >= 4
         ]
         if len(shell) < 4:
             continue
@@ -204,12 +224,14 @@ def _face_eclipse_parts(
     eclipse_opacity: float,
     dx: float = 0,
     dy: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> list[str]:
     parts = []
     for poly in _face_polygons_from_geojson(
         eclipse_geometry,
         face,
         max_step_deg=eclipse_max_step_deg,
+        projection_offset=projection_offset,
     ):
         rings = [
             _translate_points(ring, dx, dy)
@@ -274,8 +296,7 @@ def _hatch_segments(
 ) -> list[tuple[float, float, float, float]]:
     if spacing is None and density <= 0:
         return []
-    if Polygon is None:
-        raise RuntimeError("density hatching requires shapely")
+    _require_shapely("density hatching requires shapely")
 
     poly = Polygon(points)
     if poly.is_empty:
@@ -339,9 +360,14 @@ def render_face_svg(
     hatch_density: float = 0,
     hatch_spacing: float | None = None,
     hatch_angle: float = 0,
+    lon_offset: float = 0,
+    lat_offset: float = 0,
+    roll_offset: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> str:
     """Render a single cube face SVG."""
 
+    offset = projection_offset or ProjectionOffset(lon_offset, lat_offset, roll_offset)
     selected = set(cells or [])
     parts: list[str] = []
     if background:
@@ -357,6 +383,7 @@ def render_face_svg(
             eclipse_stroke=eclipse_stroke,
             eclipse_width=eclipse_width,
             eclipse_opacity=eclipse_opacity,
+            projection_offset=offset,
         ))
 
     if selected:
@@ -424,6 +451,10 @@ def render_face_net_svg(
     hatch_density: float = 0,
     hatch_spacing: float | None = None,
     hatch_angle: float = 0,
+    lon_offset: float = 0,
+    lat_offset: float = 0,
+    roll_offset: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> str:
     """Render face SVGs glued into a flat cube-net layout.
 
@@ -432,6 +463,7 @@ def render_face_net_svg(
     """
 
     rows = _normalize_face_layout(layout)
+    offset = projection_offset or ProjectionOffset(lon_offset, lat_offset, roll_offset)
     max_cols = max(len(row) for row in rows)
     width = max_cols * size
     height = len(rows) * size
@@ -461,6 +493,7 @@ def render_face_net_svg(
                     eclipse_opacity=eclipse_opacity,
                     dx=dx,
                     dy=dy,
+                    projection_offset=offset,
                 ))
             if selected:
                 parts.extend(_face_cell_parts(
@@ -565,6 +598,20 @@ def _iso_bounds(project, scale: float) -> tuple[float, float, float, float]:
     return minx, miny, maxx - minx, maxy - miny
 
 
+def _iso_face_bounds(face: int, project, scale: float) -> tuple[float, float, float, float]:
+    pts = [
+        project(_face_local_to_world(face, -1.0,  1.0), scale),
+        project(_face_local_to_world(face,  1.0,  1.0), scale),
+        project(_face_local_to_world(face,  1.0, -1.0), scale),
+        project(_face_local_to_world(face, -1.0, -1.0), scale),
+    ]
+    minx = min(p[0] for p in pts)
+    maxx = max(p[0] for p in pts)
+    miny = min(p[1] for p in pts)
+    maxy = max(p[1] for p in pts)
+    return minx, miny, maxx - minx, maxy - miny
+
+
 def _visible_edges(corner: int) -> list[tuple[int, int]]:
     far = corner ^ 7
     edges = []
@@ -600,11 +647,16 @@ def render_iso_svg(
     hatch_density: float = 0,
     hatch_spacing: float | None = None,
     hatch_angle: float = 0,
+    lon_offset: float = 0,
+    lat_offset: float = 0,
+    roll_offset: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> str:
     """Render a three-face isometric SVG from one of the 8 cube corners."""
 
     if not 0 <= corner <= 7:
         raise ValueError("corner must be 0..7")
+    offset = projection_offset or ProjectionOffset(lon_offset, lat_offset, roll_offset)
     project, visible_faces = _iso_projector(corner)
     minx, miny, width, height = _iso_bounds(project, scale)
     selected = set(cells or [])
@@ -622,6 +674,7 @@ def render_iso_svg(
                 eclipse_geometry,
                 face,
                 max_step_deg=eclipse_max_step_deg,
+                projection_offset=offset,
             ):
                 rings = _face_polygon_iso_points(poly, face, project, scale)
                 d = _polygon_paths_from_rings(rings)
@@ -667,6 +720,120 @@ def render_iso_svg(
             f'<g fill="none" stroke="{grid_stroke}" stroke-width="{grid_width}">'
             + "".join(paths)
             + f'<path d="{"".join(edge_paths)}"/>'
+            + "</g>"
+        )
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="{minx:.2f} {miny:.2f} {width:.2f} {height:.2f}" '
+        f'width="{width:.2f}" height="{height:.2f}">'
+        + "".join(parts)
+        + "</svg>"
+    )
+
+
+def render_iso_face_svg(
+    face: int,
+    *,
+    cells: Iterable[CellId] | None = None,
+    eclipse_geometry: dict[str, Any] | None = None,
+    corner: int = 7,
+    scale: float = 1000,
+    samples_per_edge: int = 12,
+    eclipse_max_step_deg: float = 0.5,
+    grid: bool = True,
+    grid_stroke: str = "#111111",
+    grid_width: float = 1,
+    eclipse_fill: str = "#ff5a6d66",
+    eclipse_stroke: str = "#ff5a6d",
+    eclipse_width: float = 2,
+    eclipse_opacity: float = 1,
+    selected_fill: str = "none",
+    selected_stroke: str = "#d33",
+    selected_width: float = 2,
+    hatch_density: float = 0,
+    hatch_spacing: float | None = None,
+    hatch_angle: float = 0,
+    lon_offset: float = 0,
+    lat_offset: float = 0,
+    roll_offset: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
+) -> str:
+    """Render one cube face as an isometric rhomb from one of the 8 corners."""
+
+    face = int(face)
+    if not 0 <= face <= 5:
+        raise ValueError("face must be 0..5")
+    if not 0 <= corner <= 7:
+        raise ValueError("corner must be 0..7")
+
+    offset = projection_offset or ProjectionOffset(lon_offset, lat_offset, roll_offset)
+    project, visible_faces = _iso_projector(corner)
+    if face not in visible_faces:
+        raise ValueError(f"face {face} is not visible from corner {corner}")
+
+    minx, miny, width, height = _iso_face_bounds(face, project, scale)
+    selected = set(cells or [])
+    parts: list[str] = []
+
+    def project_cell(cell: CellId) -> list[tuple[float, float]]:
+        return [
+            project(_face_local_to_world(cell.face, x, y), scale)
+            for x, y in cell_ring_face_xy(cell, samples_per_edge=samples_per_edge)
+        ]
+
+    if eclipse_geometry:
+        for poly in _face_polygons_from_geojson(
+            eclipse_geometry,
+            face,
+            max_step_deg=eclipse_max_step_deg,
+            projection_offset=offset,
+        ):
+            rings = _face_polygon_iso_points(poly, face, project, scale)
+            d = _polygon_paths_from_rings(rings)
+            if d:
+                parts.append(
+                    f'<path d="{d}" fill="{eclipse_fill}" fill-rule="evenodd" '
+                    f'stroke="{eclipse_stroke}" stroke-width="{eclipse_width}" '
+                    f'opacity="{eclipse_opacity}"/>'
+                )
+
+    if selected:
+        for cell in sorted(selected):
+            if cell.face != face:
+                continue
+            pts = project_cell(cell)
+            parts.append(
+                f'<path d="{_path(pts)}" fill="{selected_fill}" '
+                f'stroke="{selected_stroke}" stroke-width="{selected_width}"/>'
+            )
+            for x0, y0, x1, y1 in _hatch_segments(
+                pts,
+                density=hatch_density,
+                spacing=hatch_spacing,
+                angle_deg=hatch_angle,
+                stroke_width=selected_width,
+            ):
+                parts.append(
+                    f'<line x1="{x0:.2f}" y1="{y0:.2f}" x2="{x1:.2f}" y2="{y1:.2f}" '
+                    f'stroke="{selected_stroke}" stroke-width="{selected_width * 0.5:.2f}"/>'
+                )
+
+    if grid:
+        paths = [
+            f'<path d="{_path(project_cell(cell))}"/>'
+            for cell in cells_for_face(face)
+        ]
+        corners = [
+            project(_face_local_to_world(face, -1.0,  1.0), scale),
+            project(_face_local_to_world(face,  1.0,  1.0), scale),
+            project(_face_local_to_world(face,  1.0, -1.0), scale),
+            project(_face_local_to_world(face, -1.0, -1.0), scale),
+        ]
+        paths.append(f'<path d="{_path(corners)}"/>')
+        parts.append(
+            f'<g fill="none" stroke="{grid_stroke}" stroke-width="{grid_width}">'
+            + "".join(paths)
             + "</g>"
         )
 

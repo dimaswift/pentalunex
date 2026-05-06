@@ -6,27 +6,42 @@ from collections.abc import Iterable, Sequence
 import math
 from typing import Any
 
-try:
-    from shapely.geometry import MultiPolygon, Polygon, box
-    from shapely.ops import unary_union
-    from shapely.validation import make_valid
-except Exception:  # pragma: no cover - handled at runtime.
-    MultiPolygon = None
-    Polygon = None
-    box = None
-    unary_union = None
-    make_valid = None
+MultiPolygon = None
+Polygon = None
+box = None
+unary_union = None
+make_valid = None
 
 from .cells import CellId, all_cells, cell_at_lonlat, cell_ring_face_xy, cell_ring_lonlat, cells_for_face
-from .geometry import densify_lonlat_segment, lonlat_to_vec3, pixel_to_face_xy, to_face_xyz, unwrap_ring
+from .geometry import (
+    ProjectionOffset,
+    densify_lonlat_segment,
+    oriented_lonlat_to_vec3,
+    pixel_to_face_xy,
+    to_face_xyz,
+    unwrap_ring,
+)
 
 
 FACE_CLIP_EPS = 1e-8
 
 
 def _require_shapely() -> None:
+    global MultiPolygon, Polygon, box, unary_union, make_valid
     if Polygon is None:
-        raise RuntimeError("qscsvg.paths requires shapely for polygon intersections")
+        try:
+            from shapely.geometry import MultiPolygon as shapely_multipolygon
+            from shapely.geometry import Polygon as shapely_polygon
+            from shapely.geometry import box as shapely_box
+            from shapely.ops import unary_union as shapely_unary_union
+            from shapely.validation import make_valid as shapely_make_valid
+        except Exception as exc:  # pragma: no cover - depends on optional dependency.
+            raise RuntimeError("qscsvg.paths requires shapely for polygon intersections") from exc
+        MultiPolygon = shapely_multipolygon
+        Polygon = shapely_polygon
+        box = shapely_box
+        unary_union = shapely_unary_union
+        make_valid = shapely_make_valid
 
 
 def _closed_ring(points: Iterable[Sequence[float]]) -> list[tuple[float, float]]:
@@ -85,10 +100,11 @@ def _project_lonlat_ring_to_face(
     face: int,
     ring: Sequence[Sequence[float]],
     max_step_deg: float,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> list[tuple[float, float]]:
     out: list[tuple[float, float]] = []
     for lon, lat in _densify_ring(ring, max_step_deg):
-        p = to_face_xyz(face, lonlat_to_vec3(lon, lat))
+        p = to_face_xyz(face, oriented_lonlat_to_vec3(lon, lat, projection_offset))
         if p[2] <= FACE_CLIP_EPS:
             continue
         x = p[0] / p[2]
@@ -105,6 +121,7 @@ def _face_polygons_from_geojson(
     face: int,
     *,
     max_step_deg: float,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ):
     _require_shapely()
     if box is None:
@@ -124,10 +141,10 @@ def _face_polygons_from_geojson(
     for poly in polygons:
         if not poly:
             continue
-        shell = _project_lonlat_ring_to_face(face, poly[0], max_step_deg)
+        shell = _project_lonlat_ring_to_face(face, poly[0], max_step_deg, projection_offset)
         holes = [
             hole for ring in poly[1:]
-            if len(hole := _project_lonlat_ring_to_face(face, ring, max_step_deg)) >= 4
+            if len(hole := _project_lonlat_ring_to_face(face, ring, max_step_deg, projection_offset)) >= 4
         ]
         if len(shell) < 4:
             continue
@@ -159,7 +176,11 @@ def _cell_center_reference(cell: CellId) -> float:
     return _ring_reference(ring)
 
 
-def _ordered_boundary_cells(geometry: dict[str, Any], allowed: set[CellId]) -> list[CellId]:
+def _ordered_boundary_cells(
+    geometry: dict[str, Any],
+    allowed: set[CellId],
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
+) -> list[CellId]:
     seen: set[CellId] = set()
     ordered: list[CellId] = []
 
@@ -167,7 +188,7 @@ def _ordered_boundary_cells(geometry: dict[str, Any], allowed: set[CellId]) -> l
         for a, b in zip(ring, ring[1:]):
             samples = densify_lonlat_segment(a, b, max_step_deg=1.0)
             for lon, lat in samples:
-                cell = cell_at_lonlat(lon, lat)
+                cell = cell_at_lonlat(lon, lat, projection_offset=projection_offset)
                 if cell in allowed and cell not in seen:
                     seen.add(cell)
                     ordered.append(cell)
@@ -189,12 +210,22 @@ def cells_intersecting_geojson(
     max_step_deg: float = 0.5,
     min_area: float = 1e-9,
     ordered: bool = True,
+    lon_offset: float = 0,
+    lat_offset: float = 0,
+    roll_offset: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> list[CellId]:
     """Return cells whose face-local polygons overlap a GeoJSON polygon."""
 
+    offset = projection_offset or ProjectionOffset(lon_offset, lat_offset, roll_offset)
     hits: set[CellId] = set()
     for face in range(6):
-        face_polys = _face_polygons_from_geojson(geometry, face, max_step_deg=max_step_deg)
+        face_polys = _face_polygons_from_geojson(
+            geometry,
+            face,
+            max_step_deg=max_step_deg,
+            projection_offset=offset,
+        )
         if not face_polys:
             continue
         for cell in cells_for_face(face):
@@ -206,7 +237,7 @@ def cells_intersecting_geojson(
     if not ordered:
         return sorted(hits)
 
-    out = _ordered_boundary_cells(geometry, hits)
+    out = _ordered_boundary_cells(geometry, hits, projection_offset=offset)
     seen = set(out)
     out.extend(cell for cell in sorted(hits) if cell not in seen)
     return out

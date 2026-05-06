@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from .cells import CellId
+from .geometry import ProjectionOffset
 from .paths import cells_intersecting_geojson
 from .saros import get_eclipse
 from .svg import render_iso_svg
@@ -86,13 +87,19 @@ def best_iso_view_for_eclipse(
     samples_per_edge: int = 10,
     max_step_deg: float = 0.5,
     min_area: float = 1e-9,
+    lon_offset: float = 0,
+    lat_offset: float = 0,
+    roll_offset: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> IsoView:
     geometry = _geometry_from_eclipse(eclipse)
+    offset = projection_offset or ProjectionOffset(lon_offset, lat_offset, roll_offset)
     cells = cells_intersecting_geojson(
         geometry,
         samples_per_edge=samples_per_edge,
         max_step_deg=max_step_deg,
         min_area=min_area,
+        projection_offset=offset,
     )
     return best_iso_view_for_cells(cells)
 
@@ -105,14 +112,20 @@ def render_best_iso_eclipse_svg(
     samples_per_edge: int = 10,
     max_step_deg: float = 0.5,
     min_area: float = 1e-9,
+    lon_offset: float = 0,
+    lat_offset: float = 0,
+    roll_offset: float = 0,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
     **render_kwargs: Any,
 ) -> str:
     geometry = _geometry_from_eclipse(eclipse)
+    offset = projection_offset or ProjectionOffset(lon_offset, lat_offset, roll_offset)
     view = best_iso_view_for_eclipse(
         eclipse,
         samples_per_edge=samples_per_edge,
         max_step_deg=max_step_deg,
         min_area=min_area,
+        projection_offset=offset,
     )
     return render_iso_svg(
         cells=view.cells if include_cells else None,
@@ -120,6 +133,7 @@ def render_best_iso_eclipse_svg(
         corner=view.corner,
         samples_per_edge=samples_per_edge,
         eclipse_max_step_deg=max_step_deg,
+        projection_offset=offset,
         **render_kwargs,
     )
 

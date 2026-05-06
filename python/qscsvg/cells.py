@@ -9,6 +9,7 @@ from typing import Sequence
 from .geometry import (
     DEG,
     EQUATOR_FACE_CENTERS,
+    ProjectionOffset,
     face_xy_to_lonlat,
     lon_delta,
     lon_interval_overlap,
@@ -68,13 +69,22 @@ def _bucket(value: float, bounds: Sequence[float]) -> int:
     return len(bounds) - 2
 
 
-def cell_at_lonlat(lon: float, lat: float) -> CellId:
-    fp = lonlat_to_face_xy(lon, lat)
+def cell_at_lonlat(
+    lon: float,
+    lat: float,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
+) -> CellId:
+    fp = lonlat_to_face_xy(lon, lat, offset=projection_offset)
     return cell_at_face_xy(fp.face, fp.x, fp.y)
 
 
-def cell_at_face_xy(face: int, x: float, y: float) -> CellId:
-    lon, lat = face_xy_to_lonlat(face, x, y)
+def cell_at_face_xy(
+    face: int,
+    x: float,
+    y: float,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
+) -> CellId:
+    lon, lat = face_xy_to_lonlat(face, x, y, offset=projection_offset)
     if is_polar(face):
         sector = min(11, int(math.floor(normalize_lon_360(lon) / 30.0)))
         ring = 1 if abs(lat) >= POLAR_LAT_BOUND else 0
@@ -219,8 +229,15 @@ def cell_ring_face_xy(cell: CellId, samples_per_edge: int = 8) -> list[tuple[flo
     return arc + [pole]
 
 
-def cell_ring_lonlat(cell: CellId, samples_per_edge: int = 8) -> list[tuple[float, float]]:
-    return [face_xy_to_lonlat(cell.face, x, y) for x, y in cell_ring_face_xy(cell, samples_per_edge)]
+def cell_ring_lonlat(
+    cell: CellId,
+    samples_per_edge: int = 8,
+    projection_offset: ProjectionOffset | Sequence[float] | None = None,
+) -> list[tuple[float, float]]:
+    return [
+        face_xy_to_lonlat(cell.face, x, y, offset=projection_offset)
+        for x, y in cell_ring_face_xy(cell, samples_per_edge)
+    ]
 
 
 def _wrap_sector(sector: int) -> int:

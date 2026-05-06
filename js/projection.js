@@ -5,6 +5,19 @@
 // convention) so overlays land exactly where the map texture does.
 
 export const DEG = Math.PI / 180;
+const RAD = 180 / Math.PI;
+
+const projectionOffset = { lon: 0, lat: 0, roll: 0 };
+
+export function setProjectionOffsets(lon = 0, lat = 0, roll = 0) {
+  projectionOffset.lon = Number.isFinite(lon) ? lon : 0;
+  projectionOffset.lat = Number.isFinite(lat) ? lat : 0;
+  projectionOffset.roll = Number.isFinite(roll) ? roll : 0;
+}
+
+export function getProjectionOffsets() {
+  return { lon: projectionOffset.lon, lat: projectionOffset.lat, roll: projectionOffset.roll };
+}
 
 export const FACE_NAMES = [
   'North Pole', '+X (0°)', '+Y (90°E)', '-X (180°)', '-Y (270°E)', 'South Pole',
@@ -23,6 +36,52 @@ export function lonLatTo3D(lon, lat) {
   const la = lat * DEG, lo = lon * DEG;
   const cl = Math.cos(la);
   return [cl*Math.cos(lo), cl*Math.sin(lo), Math.sin(la)];
+}
+
+function rotateZ(p, deg) {
+  const a = deg * DEG, c = Math.cos(a), s = Math.sin(a);
+  return [p[0] * c - p[1] * s, p[0] * s + p[1] * c, p[2]];
+}
+
+function rotateY(p, deg) {
+  const a = deg * DEG, c = Math.cos(a), s = Math.sin(a);
+  return [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c];
+}
+
+function rotateX(p, deg) {
+  const a = deg * DEG, c = Math.cos(a), s = Math.sin(a);
+  return [p[0], p[1] * c - p[2] * s, p[1] * s + p[2] * c];
+}
+
+function sphericalToLonLat(p) {
+  const lon = Math.atan2(p[1], p[0]) * RAD;
+  const lat = Math.asin(Math.max(-1, Math.min(1, p[2]))) * RAD;
+  return { lon, lat };
+}
+
+export function orientedLonLatTo3D(lon, lat) {
+  return rotateX(
+    rotateY(rotateZ(lonLatTo3D(lon, lat), projectionOffset.lon), projectionOffset.lat),
+    projectionOffset.roll,
+  );
+}
+
+export function cubeVectorToLonLat(p) {
+  return sphericalToLonLat(rotateZ(
+    rotateY(rotateX(p, -projectionOffset.roll), -projectionOffset.lat),
+    -projectionOffset.lon,
+  ));
+}
+
+export function faceXYToLonLat(face, x, y) {
+  const f = FACE_FRAMES[face];
+  const p = [
+    f.east[0] * x + f.north[0] * y + f.normal[0],
+    f.east[1] * x + f.north[1] * y + f.normal[1],
+    f.east[2] * x + f.north[2] * y + f.normal[2],
+  ];
+  const len = Math.hypot(p[0], p[1], p[2]);
+  return cubeVectorToLonLat([p[0] / len, p[1] / len, p[2] / len]);
 }
 
 export function toFaceXYZ(face, p) {
@@ -84,10 +143,10 @@ export function drawPolylineOnFace(ctx, face, coords, N, opts) {
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.beginPath();
-  let prev3 = toFaceXYZ(face, lonLatTo3D(coords[0][0], coords[0][1]));
+  let prev3 = toFaceXYZ(face, orientedLonLatTo3D(coords[0][0], coords[0][1]));
   let lastEnd = null;
   for (let i = 1; i < coords.length; i++) {
-    const cur3 = toFaceXYZ(face, lonLatTo3D(coords[i][0], coords[i][1]));
+    const cur3 = toFaceXYZ(face, orientedLonLatTo3D(coords[i][0], coords[i][1]));
     const seg = clipSegment(prev3, cur3);
     if (seg) {
       const a = projXY(seg[0], N), b = projXY(seg[1], N);
@@ -110,7 +169,7 @@ export function drawPolygonOnFace(ctx, face, rings, N, opts) {
   ctx.globalAlpha = opts.alpha ?? 1;
   ctx.beginPath();
   for (const ring of rings) {
-    const ring3 = ring.map(pt => toFaceXYZ(face, lonLatTo3D(pt[0], pt[1])));
+    const ring3 = ring.map(pt => toFaceXYZ(face, orientedLonLatTo3D(pt[0], pt[1])));
     const clipped = clipRing(ring3);
     if (clipped.length < 3) continue;
     const first = projXY(clipped[0], N);

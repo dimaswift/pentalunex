@@ -125,6 +125,18 @@
         <label for="zoom-level">Zoom <span id="zoom-val">3</span></label>
         <input type="range" id="zoom-level" min="1" max="5" step="1" value="3">
       </div>
+      <div class="row">
+        <label for="lon-offset">Lon offset <span id="lon-offset-val">0°</span></label>
+        <input type="range" id="lon-offset" min="-180" max="180" step="0.5" value="0">
+      </div>
+      <div class="row">
+        <label for="lat-offset">Lat offset <span id="lat-offset-val">0°</span></label>
+        <input type="range" id="lat-offset" min="-89" max="89" step="0.5" value="0">
+      </div>
+      <div class="row">
+        <label for="roll-offset">Roll offset <span id="roll-offset-val">0°</span></label>
+        <input type="range" id="roll-offset" min="-180" max="180" step="0.5" value="0">
+      </div>
       <button id="btn-render">Render Textures</button>
     </div>
 
@@ -237,7 +249,20 @@
           <option value="7" selected>7 — (+X, +Y, +Z)</option>
         </select>
       </div>
+      <div class="row">
+        <label>Face</label>
+        <select id="iso-face">
+          <option value="all" selected>All visible faces</option>
+          <option value="0">0 — N</option>
+          <option value="1">1 — +X</option>
+          <option value="2">2 — +Y</option>
+          <option value="3">3 — −X</option>
+          <option value="4">4 — −Y</option>
+          <option value="5">5 — S</option>
+        </select>
+      </div>
       <button id="btn-export-map-grat" style="width:100%;">Export map + graticule</button>
+      <button id="btn-export-tile-sandbox" style="width:100%;">Export tile sandbox zip</button>
       <button id="btn-export-path-cells" style="width:100%;">Export path + cells + metadata</button>
       <button id="btn-export-all-corners" style="width:100%;">Export all 8 paths (zip)</button>
     </div>

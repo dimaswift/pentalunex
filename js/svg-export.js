@@ -1,6 +1,6 @@
 // SVG export of graticule + eclipse overlays for selected faces.
 // Uses manual 2D Cohen-Sutherland clipping (LightBurn ignores SVG clipPath).
-import { toFaceXYZ, lonLatTo3D, clipSegment, clipRing, projXY } from './projection.js';
+import { toFaceXYZ, orientedLonLatTo3D, clipSegment, clipRing, projXY } from './projection.js';
 import { generateGraticuleCellRing } from './graticule-cells.js';
 import { isPartialType } from './eclipse-overlay.js';
 
@@ -32,10 +32,10 @@ function clip2D(ax, ay, bx, by, x0, y0, x1, y1) {
 function polylinePath(face, coords, N) {
   if (coords.length < 2) return '';
   const d = [];
-  let prev3 = toFaceXYZ(face, lonLatTo3D(coords[0][0], coords[0][1]));
+  let prev3 = toFaceXYZ(face, orientedLonLatTo3D(coords[0][0], coords[0][1]));
   let lastEnd = null;
   for (let i = 1; i < coords.length; i++) {
-    const cur3 = toFaceXYZ(face, lonLatTo3D(coords[i][0], coords[i][1]));
+    const cur3 = toFaceXYZ(face, orientedLonLatTo3D(coords[i][0], coords[i][1]));
     const seg = clipSegment(prev3, cur3);
     if (seg) {
       const a = projXY(seg[0], N), b = projXY(seg[1], N);
@@ -56,7 +56,7 @@ function polylinePath(face, coords, N) {
 function polygonPath(face, rings, N) {
   const d = [];
   for (const ring of rings) {
-    const ring3 = ring.map(pt => toFaceXYZ(face, lonLatTo3D(pt[0], pt[1])));
+    const ring3 = ring.map(pt => toFaceXYZ(face, orientedLonLatTo3D(pt[0], pt[1])));
     const clipped = clipRing(ring3);
     if (clipped.length < 3) continue;
     const pts = clipped.map(p => projXY(p, N));
@@ -180,7 +180,7 @@ function hatchGroup(face, N, ec, hatchInterval, gratStep) {
 
   for (const { lonIdx, latIdx } of cells) {
     const ring = generateGraticuleCellRing(lonIdx, latIdx, gratStep);
-    const ring3 = ring.map(pt => toFaceXYZ(face, lonLatTo3D(pt[0], pt[1])));
+    const ring3 = ring.map(pt => toFaceXYZ(face, orientedLonLatTo3D(pt[0], pt[1])));
     const clipped = clipRing(ring3);
     if (clipped.length < 3) continue;
     // Clip projected polygon to face bounds before hatching — prevents phantom
@@ -231,11 +231,11 @@ function buildFaceSvg(face, N, gratState, eclipseState, hatchInterval) {
 //     cube surface (no per-face transform, so cells that span face boundaries
 //     stay continuous and unclipped — required for laser engraving).
 
-// Geographic 3D unit vector (from lonLatTo3D) → THREE.js scene cube-surface
+// Offset geographic 3D unit vector → THREE.js scene cube-surface
 // position. The geo→scene axis remap is (gx, gy, gz) → (gy, gz, gx); the
 // max-axis ray intersects the cube at ±0.5.
 function lonLatToCubePoint(lon, lat) {
-  const [gx, gy, gz] = lonLatTo3D(lon, lat);
+  const [gx, gy, gz] = orientedLonLatTo3D(lon, lat);
   const tx = gy, ty = gz, tz = gx;
   const m = Math.max(Math.abs(tx), Math.abs(ty), Math.abs(tz));
   return [tx * 0.5 / m, ty * 0.5 / m, tz * 0.5 / m];
@@ -318,6 +318,25 @@ function isoHexBounds(projector, scale) {
   return { minX, minY, w: maxX - minX, h: maxY - minY };
 }
 
+function faceCornersWorld(face) {
+  return [
+    faceLocalToWorld(face, -0.5, -0.5),
+    faceLocalToWorld(face,  0.5, -0.5),
+    faceLocalToWorld(face,  0.5,  0.5),
+    faceLocalToWorld(face, -0.5,  0.5),
+  ];
+}
+
+function isoFaceBounds(face, projector, scale) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const corner of faceCornersWorld(face)) {
+    const [x, y] = projector.project(corner, scale);
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  return { minX, minY, w: maxX - minX, h: maxY - minY };
+}
+
 // The 9 visible cube edges from cornerIdx (12 total minus the 3 at the far
 // corner). Includes the 6 hexagon-outline edges and the 3 internal edges
 // from the closest corner.
@@ -345,6 +364,15 @@ function cubeEdgesPathD(cornerIdx, projector, scale) {
   return d.join('');
 }
 
+function faceEdgesPathD(face, projector, scale) {
+  const corners = faceCornersWorld(face).map(p => projector.project(p, scale));
+  const d = [`M${corners[0][0].toFixed(2)},${corners[0][1].toFixed(2)}`];
+  for (let i = 1; i < corners.length; i++)
+    d.push(`L${corners[i][0].toFixed(2)},${corners[i][1].toFixed(2)}`);
+  d.push('Z');
+  return d.join('');
+}
+
 // Map (graticule ∪ cube edges) SVG for a chosen corner.
 export function buildIsoGraticuleSvg(N, gratState, scale, cornerIdx) {
   const projector = isoProjector(cornerIdx);
@@ -366,6 +394,43 @@ export function buildIsoGraticuleSvg(N, gratState, scale, cornerIdx) {
       const t = isoFaceTransform(face, N, scale, projector);
       groups.push(`<g transform="matrix(${t.a} ${t.b} ${t.c} ${t.d} ${t.e} ${t.f})">${content}</g>`);
     }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" `
+    + `viewBox="${b.minX.toFixed(2)} ${b.minY.toFixed(2)} ${b.w.toFixed(2)} ${b.h.toFixed(2)}" `
+    + `width="${b.w.toFixed(2)}" height="${b.h.toFixed(2)}">`
+    + groups.join('') + '</svg>';
+}
+
+// Map (graticule ∪ face boundary) SVG for one face from the chosen corner.
+export function buildIsoFaceGraticuleSvg(N, gratState, scale, cornerIdx, face, opts = {}) {
+  const projector = isoProjector(cornerIdx);
+  const b = isoFaceBounds(face, projector, scale);
+  const groups = [];
+
+  const edgeColor = gratState.enabled ? gratState.color : '#000000';
+  const edgeWidth = gratState.enabled ? gratState.width : 1;
+  const edgeAlpha = gratState.enabled ? gratState.alpha : 1;
+
+  if (gratState.enabled) {
+    const content = graticuleGroup(face, N, gratState);
+    if (content) {
+      const t = isoFaceTransform(face, N, scale, projector);
+      groups.push(`<g transform="matrix(${t.a} ${t.b} ${t.c} ${t.d} ${t.e} ${t.f})">${content}</g>`);
+    }
+  }
+
+  groups.push(`<g fill="none" stroke="${edgeColor}" stroke-width="${edgeWidth}" opacity="${edgeAlpha}">`
+    + `<path d="${faceEdgesPathD(face, projector, scale)}"/></g>`);
+
+  if (opts.rotate) {
+    const r = opts.rotate;
+    return `<svg xmlns="http://www.w3.org/2000/svg" `
+      + `viewBox="0 0 ${r.width.toFixed(2)} ${r.height.toFixed(2)}" `
+      + `width="${r.width.toFixed(2)}" height="${r.height.toFixed(2)}">`
+      + `<g transform="translate(${(r.translate[0] + r.pad[0]).toFixed(4)} ${(r.translate[1] + r.pad[1]).toFixed(4)}) `
+      + `rotate(${r.angleDeg.toFixed(8)}) translate(${-b.minX.toFixed(4)} ${-b.minY.toFixed(4)})">`
+      + groups.join('') + '</g></svg>';
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" `

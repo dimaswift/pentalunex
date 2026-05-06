@@ -3,7 +3,7 @@
 // polyline instead of filling polygons.
 import { decodeSeries } from '../eclipse_codec.js';
 import { SolarEclipseDB } from '../saros-browser.js';
-import { drawPolygonOnFace, drawPolylineOnFace, FACE_FRAMES, lonLatTo3D } from './projection.js';
+import { drawPolygonOnFace, drawPolylineOnFace, FACE_FRAMES, orientedLonLatTo3D } from './projection.js';
 import { findGraticuleCellIndex } from './graticule-cells.js';
 
 const PARTIAL_TYPES = new Set(['P', 'Pb', 'Pe', 'Tminus', 'Aminus', 'Aplus']);
@@ -33,7 +33,7 @@ function drawRingsAsLines(ctx, faceIdx, rings, N, style) {
 
 // Same face-detection logic as mouse hover: highest dot product with face normal
 function lonLatToFace(lon, lat) {
-  const p = lonLatTo3D(lon, lat);
+  const p = orientedLonLatTo3D(lon, lat);
   let maxDot = -Infinity, owningFace = 0;
   for (let f = 0; f < 6; f++) {
     const { normal } = FACE_FRAMES[f];

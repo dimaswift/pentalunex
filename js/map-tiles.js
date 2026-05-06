@@ -1,6 +1,5 @@
 // Raster tile rendering: per-pixel inverse projection, sample web mercator tiles.
-import { faceXYToLatLon } from '../csc.js';
-import { DEG } from './projection.js';
+import { DEG, faceXYToLonLat } from './projection.js';
 
 export const TILE_SOURCES = {
   osm:       { url: (z,x,y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`, hasNoLabels: false },
@@ -56,7 +55,7 @@ export async function renderFaceTiles(canvas, faceIdx, N, zoom, tileUrlFn) {
     for (let col = 0; col < N; col++) {
       const xF = (col + 0.5) / N * 2 - 1;
       const yF = 1 - (row + 0.5) / N * 2;
-      const { lat, lon } = faceXYToLatLon(faceIdx, xF, yF);
+      const { lat, lon } = faceXYToLonLat(faceIdx, xF, yF);
       const latRad = lat * DEG;
       const tx = Math.floor((lon + 180) / 360 * n);
       const ty = Math.floor((1 - Math.log(Math.tan(latRad) + 1/Math.cos(latRad)) / Math.PI) / 2 * n);
@@ -74,7 +73,7 @@ export async function renderFaceTiles(canvas, faceIdx, N, zoom, tileUrlFn) {
     for (let col = 0; col < N; col++) {
       const xF = (col + 0.5) / N * 2 - 1;
       const yF = 1 - (row + 0.5) / N * 2;
-      const { lat, lon } = faceXYToLatLon(faceIdx, xF, yF);
+      const { lat, lon } = faceXYToLonLat(faceIdx, xF, yF);
       const latRad = lat * DEG;
       const txF = (lon + 180) / 360 * n;
       const tyF = (1 - Math.log(Math.tan(latRad) + 1/Math.cos(latRad)) / Math.PI) / 2 * n;

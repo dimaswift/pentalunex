@@ -1,5 +1,5 @@
 // Graticule cell detection and highlighting for cube map faces
-import { DEG, FACE_FRAMES, toFaceXYZ, lonLatTo3D, clipRing, projXY } from './projection.js';
+import { DEG, FACE_FRAMES, toFaceXYZ, orientedLonLatTo3D, cubeVectorToLonLat, clipRing, projXY } from './projection.js';
 
 // Reverse projection: pixel → face XYZ → lon/lat
 export function pixelToLonLat(face, px, py, N) {
@@ -22,7 +22,8 @@ export function pixelToLonLat(face, px, py, N) {
     nx * f.east[2] + ny * f.north[2] + nz * f.normal[2],
   ];
 
-  return sphericalToLonLat(p);
+  const { lon, lat } = cubeVectorToLonLat(p);
+  return [lon, lat];
 }
 
 function sphericalToLonLat(p) {
@@ -80,7 +81,7 @@ export function drawFaceBoundaries(ctx, face, N, opts) {
   for (let f = 0; f < 6; f++) {
     const polylines = getFaceBoundaryPolylines(f);
     for (const ring of polylines) {
-      const ring3 = ring.map(pt => toFaceXYZ(face, lonLatTo3D(pt[0], pt[1])));
+      const ring3 = ring.map(pt => toFaceXYZ(face, orientedLonLatTo3D(pt[0], pt[1])));
       const clipped = clipRing(ring3);
 
       if (clipped.length < 2) continue;
@@ -112,7 +113,7 @@ export function drawFaceBoundaries(ctx, face, N, opts) {
 // Draw a graticule cell on a specific face
 export function drawGraticuleCellOnFace(ctx, face, lonIdx, latIdx, step, N, opts) {
   const ring = generateGraticuleCellRing(lonIdx, latIdx, step);
-  const ring3 = ring.map(pt => toFaceXYZ(face, lonLatTo3D(pt[0], pt[1])));
+  const ring3 = ring.map(pt => toFaceXYZ(face, orientedLonLatTo3D(pt[0], pt[1])));
   const clipped = clipRing(ring3);
 
   if (clipped.length < 3) return; // Not visible on this face
@@ -183,7 +184,7 @@ export function getFaceBounds(face) {
         x * FACE_FRAMES[face].east[1] + y * FACE_FRAMES[face].north[1] + FACE_FRAMES[face].normal[1],
         x * FACE_FRAMES[face].east[2] + y * FACE_FRAMES[face].north[2] + FACE_FRAMES[face].normal[2],
       ];
-      const [lon, lat] = sphericalToLonLat(p);
+      const { lon, lat } = cubeVectorToLonLat(p);
       minLon = Math.min(minLon, lon);
       maxLon = Math.max(maxLon, lon);
       minLat = Math.min(minLat, lat);
@@ -240,7 +241,7 @@ export function getFaceBoundaryPolylines(face, samples = 30) {
         x * FACE_FRAMES[face].east[1] + y * FACE_FRAMES[face].north[1] + FACE_FRAMES[face].normal[1],
         x * FACE_FRAMES[face].east[2] + y * FACE_FRAMES[face].north[2] + FACE_FRAMES[face].normal[2],
       ];
-      const [lon, lat] = sphericalToLonLat(p);
+      const { lon, lat } = cubeVectorToLonLat(p);
       ring.push([lon, lat]);
     }
     polylines.push(ring);
