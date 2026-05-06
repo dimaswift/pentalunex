@@ -27,6 +27,8 @@ CLASSIC_CROSS_LAYOUT = (
     (4, 1, 2, 3),
     (None, 5, None, None),
 )
+FACE_EDGE_NAMES = ("top", "right", "bottom", "left")
+FACE_CORNER_NAMES = ("top_left", "top_right", "bottom_right", "bottom_left")
 
 
 def _require_shapely(reason: str) -> None:
@@ -187,6 +189,44 @@ def _translate_points(
     return [(p[0] + dx, p[1] + dy) for p in points]
 
 
+def _face_edge_index(edge: int | str) -> int:
+    if isinstance(edge, str):
+        try:
+            return FACE_EDGE_NAMES.index(edge)
+        except ValueError as exc:
+            raise ValueError(f"edge must be one of {FACE_EDGE_NAMES}") from exc
+    idx = int(edge)
+    if not 0 <= idx <= 3:
+        raise ValueError("edge must be 0..3")
+    return idx
+
+
+def _edge_angle_deg(corners: Sequence[Sequence[float]], edge: int | str) -> float:
+    idx = _face_edge_index(edge)
+    a = corners[idx]
+    b = corners[(idx + 1) % 4]
+    return math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+
+
+def _flat_face_corners(size: float, dx: float = 0, dy: float = 0) -> list[tuple[float, float]]:
+    return [
+        (dx, dy),
+        (dx + size, dy),
+        (dx + size, dy + size),
+        (dx, dy + size),
+    ]
+
+
+def _resolve_hatch_angle(
+    hatch_angle: float,
+    hatch_parallel_edge: int | str | None,
+    corners: Sequence[Sequence[float]],
+) -> float:
+    if hatch_parallel_edge is None:
+        return hatch_angle
+    return _edge_angle_deg(corners, hatch_parallel_edge)
+
+
 def _face_grid_parts(
     face: int,
     *,
@@ -259,10 +299,16 @@ def _face_cell_parts(
     hatch_density: float,
     hatch_spacing: float | None,
     hatch_angle: float,
+    hatch_parallel_edge: int | str | None = None,
     dx: float = 0,
     dy: float = 0,
 ) -> list[str]:
     parts = []
+    resolved_hatch_angle = _resolve_hatch_angle(
+        hatch_angle,
+        hatch_parallel_edge,
+        _flat_face_corners(size, dx, dy),
+    )
     for cell in sorted(selected):
         validate_cell(cell)
         if cell.face != face:
@@ -276,7 +322,7 @@ def _face_cell_parts(
             pts,
             density=hatch_density,
             spacing=hatch_spacing,
-            angle_deg=hatch_angle,
+            angle_deg=resolved_hatch_angle,
             stroke_width=selected_width,
         ):
             parts.append(
@@ -360,6 +406,7 @@ def render_face_svg(
     hatch_density: float = 0,
     hatch_spacing: float | None = None,
     hatch_angle: float = 0,
+    hatch_parallel_edge: int | str | None = None,
     lon_offset: float = 0,
     lat_offset: float = 0,
     roll_offset: float = 0,
@@ -398,6 +445,7 @@ def render_face_svg(
             hatch_density=hatch_density,
             hatch_spacing=hatch_spacing,
             hatch_angle=hatch_angle,
+            hatch_parallel_edge=hatch_parallel_edge,
         ))
 
     if grid:
@@ -451,6 +499,7 @@ def render_face_net_svg(
     hatch_density: float = 0,
     hatch_spacing: float | None = None,
     hatch_angle: float = 0,
+    hatch_parallel_edge: int | str | None = None,
     lon_offset: float = 0,
     lat_offset: float = 0,
     roll_offset: float = 0,
@@ -507,6 +556,7 @@ def render_face_net_svg(
                     hatch_density=hatch_density,
                     hatch_spacing=hatch_spacing,
                     hatch_angle=hatch_angle,
+                    hatch_parallel_edge=hatch_parallel_edge,
                     dx=dx,
                     dy=dy,
                 ))
@@ -599,17 +649,88 @@ def _iso_bounds(project, scale: float) -> tuple[float, float, float, float]:
 
 
 def _iso_face_bounds(face: int, project, scale: float) -> tuple[float, float, float, float]:
-    pts = [
-        project(_face_local_to_world(face, -1.0,  1.0), scale),
-        project(_face_local_to_world(face,  1.0,  1.0), scale),
-        project(_face_local_to_world(face,  1.0, -1.0), scale),
-        project(_face_local_to_world(face, -1.0, -1.0), scale),
-    ]
+    pts = _iso_face_corners(face, project, scale)
     minx = min(p[0] for p in pts)
     maxx = max(p[0] for p in pts)
     miny = min(p[1] for p in pts)
     maxy = max(p[1] for p in pts)
     return minx, miny, maxx - minx, maxy - miny
+
+
+def _iso_face_corners(face: int, project, scale: float) -> list[tuple[float, float]]:
+    return [
+        project(_face_local_to_world(face, -1.0,  1.0), scale),
+        project(_face_local_to_world(face,  1.0,  1.0), scale),
+        project(_face_local_to_world(face,  1.0, -1.0), scale),
+        project(_face_local_to_world(face, -1.0, -1.0), scale),
+    ]
+
+
+def _edge_source_points(
+    corners: Sequence[Sequence[float]],
+    edge: int | str,
+) -> tuple[Sequence[float], Sequence[float]]:
+    idx = _face_edge_index(edge)
+    return corners[idx], corners[(idx + 1) % 4]
+
+
+def _visual_primary_edge(corners: Sequence[Sequence[float]]) -> str:
+    candidates = []
+    for idx, name in enumerate(FACE_EDGE_NAMES):
+        a, b = _edge_source_points(corners, idx)
+        candidates.append((0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), name))
+    candidates.sort()
+    return candidates[0][2]
+
+
+def _edge_order_from_primary(primary_edge: str) -> tuple[str, str, str, str]:
+    idx = FACE_EDGE_NAMES.index(primary_edge)
+    return FACE_EDGE_NAMES[idx:] + FACE_EDGE_NAMES[:idx]
+
+
+def _rotate_point(p: Sequence[float], angle_rad: float) -> tuple[float, float]:
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return (p[0] * c - p[1] * s, p[0] * s + p[1] * c)
+
+
+def _rotation_frame(
+    corners: Sequence[Sequence[float]],
+    target_width: float | None = None,
+    target_height: float | None = None,
+) -> dict[str, Any]:
+    primary_edge = _visual_primary_edge(corners)
+    a, b = _edge_source_points(corners, primary_edge)
+    angle_rad = -math.pi / 2 - math.atan2(b[1] - a[1], b[0] - a[0])
+    rotated = [_rotate_point(p, angle_rad) for p in corners]
+    minx = min(p[0] for p in rotated)
+    maxx = max(p[0] for p in rotated)
+    miny = min(p[1] for p in rotated)
+    maxy = max(p[1] for p in rotated)
+    tight_width = maxx - minx
+    tight_height = maxy - miny
+    width = float(target_width if target_width is not None else tight_width)
+    height = float(target_height if target_height is not None else tight_height)
+    return {
+        "primary_edge": primary_edge,
+        "edge_order": _edge_order_from_primary(primary_edge),
+        "angle_rad": angle_rad,
+        "angle_deg": math.degrees(angle_rad),
+        "translate": (-minx, -miny),
+        "pad": ((width - tight_width) * 0.5, (height - tight_height) * 0.5),
+        "tight_width": tight_width,
+        "tight_height": tight_height,
+        "width": width,
+        "height": height,
+    }
+
+
+def _frame_matrix(frame: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    c = math.cos(frame["angle_rad"])
+    s = math.sin(frame["angle_rad"])
+    e = frame["translate"][0] + frame["pad"][0]
+    f = frame["translate"][1] + frame["pad"][1]
+    return (c, s, -s, c, e, f)
 
 
 def _visible_edges(corner: int) -> list[tuple[int, int]]:
@@ -647,6 +768,7 @@ def render_iso_svg(
     hatch_density: float = 0,
     hatch_spacing: float | None = None,
     hatch_angle: float = 0,
+    hatch_parallel_edge: int | str | None = None,
     lon_offset: float = 0,
     lat_offset: float = 0,
     roll_offset: float = 0,
@@ -690,6 +812,11 @@ def render_iso_svg(
             if cell.face not in visible_faces:
                 continue
             pts = project_cell(cell)
+            resolved_hatch_angle = _resolve_hatch_angle(
+                hatch_angle,
+                hatch_parallel_edge,
+                _iso_face_corners(cell.face, project, scale),
+            )
             parts.append(
                 f'<path d="{_path(pts)}" fill="{selected_fill}" '
                 f'stroke="{selected_stroke}" stroke-width="{selected_width}"/>'
@@ -698,7 +825,7 @@ def render_iso_svg(
                 pts,
                 density=hatch_density,
                 spacing=hatch_spacing,
-                angle_deg=hatch_angle,
+                angle_deg=resolved_hatch_angle,
                 stroke_width=selected_width,
             ):
                 parts.append(
@@ -754,10 +881,15 @@ def render_iso_face_svg(
     hatch_density: float = 0,
     hatch_spacing: float | None = None,
     hatch_angle: float = 0,
+    hatch_parallel_edge: int | str | None = None,
     lon_offset: float = 0,
     lat_offset: float = 0,
     roll_offset: float = 0,
     projection_offset: ProjectionOffset | Sequence[float] | None = None,
+    normalize_orientation: bool = False,
+    target_width: float | None = None,
+    target_height: float | None = None,
+    mirror: bool = False,
 ) -> str:
     """Render one cube face as an isometric rhomb from one of the 8 corners."""
 
@@ -772,6 +904,7 @@ def render_iso_face_svg(
     if face not in visible_faces:
         raise ValueError(f"face {face} is not visible from corner {corner}")
 
+    corners = _iso_face_corners(face, project, scale)
     minx, miny, width, height = _iso_face_bounds(face, project, scale)
     selected = set(cells or [])
     parts: list[str] = []
@@ -803,6 +936,11 @@ def render_iso_face_svg(
             if cell.face != face:
                 continue
             pts = project_cell(cell)
+            resolved_hatch_angle = _resolve_hatch_angle(
+                hatch_angle,
+                hatch_parallel_edge,
+                corners,
+            )
             parts.append(
                 f'<path d="{_path(pts)}" fill="{selected_fill}" '
                 f'stroke="{selected_stroke}" stroke-width="{selected_width}"/>'
@@ -811,7 +949,7 @@ def render_iso_face_svg(
                 pts,
                 density=hatch_density,
                 spacing=hatch_spacing,
-                angle_deg=hatch_angle,
+                angle_deg=resolved_hatch_angle,
                 stroke_width=selected_width,
             ):
                 parts.append(
@@ -825,10 +963,7 @@ def render_iso_face_svg(
             for cell in cells_for_face(face)
         ]
         corners = [
-            project(_face_local_to_world(face, -1.0,  1.0), scale),
-            project(_face_local_to_world(face,  1.0,  1.0), scale),
-            project(_face_local_to_world(face,  1.0, -1.0), scale),
-            project(_face_local_to_world(face, -1.0, -1.0), scale),
+            *corners,
         ]
         paths.append(f'<path d="{_path(corners)}"/>')
         parts.append(
@@ -837,10 +972,35 @@ def render_iso_face_svg(
             + "</g>"
         )
 
+    body = "".join(parts)
+    if normalize_orientation:
+        frame = _rotation_frame(corners, target_width, target_height)
+        a, b, c, d, e, f = _frame_matrix(frame)
+        body = (
+            f'<g transform="matrix({a:.10f} {b:.10f} {c:.10f} {d:.10f} {e:.2f} {f:.2f})">'
+            + body
+            + "</g>"
+        )
+        width = frame["width"]
+        height = frame["height"]
+        if mirror:
+            body = f'<g transform="translate({width:.2f},0) scale(-1,1)">{body}</g>'
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'viewBox="0 0 {width:.2f} {height:.2f}" '
+            f'width="{width:.2f}" height="{height:.2f}">'
+            + body
+            + "</svg>"
+        )
+
+    if mirror:
+        center_x = minx + width * 0.5
+        body = f'<g transform="translate({2 * center_x:.2f},0) scale(-1,1)">{body}</g>'
+
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'viewBox="{minx:.2f} {miny:.2f} {width:.2f} {height:.2f}" '
         f'width="{width:.2f}" height="{height:.2f}">'
-        + "".join(parts)
+        + body
         + "</svg>"
     )

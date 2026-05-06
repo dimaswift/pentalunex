@@ -20,8 +20,11 @@ def main() -> None:
     print("cell at lon=0 lat=0:", cell)
     print("edge neighbors:", adjacent_cells(cell))
 
-    eclipse = get_eclipse(140, 25)
-    view = best_iso_view_for_eclipse(eclipse, samples_per_edge=6)
+    eclipse = get_eclipse(141, 22)
+    view = best_iso_view_for_eclipse(eclipse, samples_per_edge=6,      
+    lon_offset=45,
+    lat_offset=35.2643897,
+    roll_offset=-45)
     cells = list(view.cells)
     print(
         f"Saros 141 position 22: {eclipse['datetime_utc']} "
@@ -117,6 +120,38 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    from qscsvg import render_iso_face_svg, export_tile_sandbox_zip
 
+    (out_dir / "example_single_face.svg").write_text(render_iso_face_svg(
+        face,
+        cells=cells,
+        eclipse_geometry=eclipse["geometry"],
+        selected_fill="#d21f3c22",
+        selected_stroke="#d21f3c",
+        eclipse_fill="#ff5a6d66",
+        eclipse_stroke="#ff5a6d",
+        hatch_spacing=18,
+        hatch_angle=90,
+        corner=view.corner,
+        lon_offset=45,
+        lat_offset=45,
+        roll_offset=-0,
+    ))
+
+    export_tile_sandbox_zip(
+    "tiles.zip",
+    scale=1000,
+    lon_offset=45,
+    lat_offset=35.2643897,
+    roll_offset=-45,
+    cells=cells,
+    eclipse_geometry=eclipse["geometry"],
+    hatch_parallel_edge="left",
+    selected_fill="#d21f3c22",
+    selected_stroke="#d21f3c",
+    eclipse_fill="#ff5a6d66",
+    eclipse_stroke="#ff5a6d",
+    hatch_spacing=18,
+)
 if __name__ == "__main__":
     main()

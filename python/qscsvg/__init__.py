@@ -23,6 +23,7 @@ from .geometry import (
     pixel_to_face_xy,
 )
 from .paths import cells_intersecting_face_polygon, cells_intersecting_geojson
+from .sandbox import export_tile_sandbox_zip
 from .saros import get_eclipse, load_saros
 from .svg import CLASSIC_CROSS_LAYOUT, render_face_net_svg, render_face_svg, render_iso_face_svg, render_iso_svg
 from .view import (
@@ -56,6 +57,7 @@ __all__ = [
     "cells_intersecting_geojson",
     "face_xy_to_lonlat",
     "face_xy_to_pixel",
+    "export_tile_sandbox_zip",
     "get_eclipse",
     "load_saros",
     "lonlat_to_face_xy",
