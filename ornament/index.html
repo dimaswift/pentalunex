@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<title>Ornament Builder</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; }
+  body {
+    background: #0a0a14; color: #ccc; font-family: monospace;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+
+  #toolbar {
+    flex: 0 0 auto;
+    background: #111;
+    border-bottom: 1px solid #333;
+    padding: 8px 12px;
+    display: flex; gap: 8px; align-items: center;
+    z-index: 10;
+  }
+  #toolbar h1 {
+    font-size: 13px; color: #7af; letter-spacing: 1px; text-transform: uppercase;
+    margin-right: 16px;
+  }
+  #toolbar .spacer { flex: 1; }
+  #toolbar .hint { font-size: 11px; color: #666; }
+
+  button {
+    background: #1a1a2e; color: #ccc;
+    border: 1px solid #444; padding: 5px 10px; font-size: 12px; border-radius: 3px;
+    font-family: monospace; cursor: pointer;
+  }
+  button:hover { background: #25253b; border-color: #7af; color: #fff; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #stage {
+    flex: 1 1 auto;
+    position: relative;
+    background:
+      radial-gradient(circle at 50% 50%, #11111c 0%, #06060c 80%);
+    overflow: hidden;
+    cursor: default;
+  }
+  #stage.panning { cursor: grabbing; }
+  #canvas {
+    width: 100%; height: 100%;
+    display: block;
+    user-select: none;
+  }
+  .placed-tile { cursor: grab; }
+  .placed-tile.selected .tile-outline { stroke: #7af; stroke-width: 60; }
+  .placed-tile.dragging { opacity: 0.4; pointer-events: none; }
+  .ghost { opacity: 0.55; pointer-events: none; }
+  .ghost.invalid { opacity: 0.3; }
+  .ghost .tile-outline { stroke: #7af; stroke-width: 80; stroke-dasharray: 200,120; fill: none; }
+  .ghost.invalid .tile-outline { stroke: #f55; }
+  .anchor-edge { stroke: #ffeb3b; stroke-width: 18; stroke-linecap: round; pointer-events: none; }
+
+  #palette {
+    flex: 0 0 auto;
+    height: 168px;
+    background: #0d0d1a;
+    border-top: 1px solid #333;
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px;
+    gap: 10px;
+  }
+  .tile-card {
+    flex: 0 0 auto;
+    width: 130px; height: 140px;
+    background: #15152a;
+    border: 1px solid #333;
+    border-radius: 4px;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 6px;
+    cursor: grab;
+    user-select: none;
+    position: relative;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .tile-card:hover { border-color: #7af; }
+  .tile-card.valid {
+    border-color: #4caf50;
+    background: #16201a;
+    box-shadow: 0 0 8px rgba(76, 175, 80, 0.25);
+  }
+  .tile-card.valid:hover { border-color: #7af; }
+  .tile-card.dragging { opacity: 0.4; }
+  .tile-card svg { width: 100%; flex: 1 1 auto; max-height: 100px; }
+  .tile-card .label {
+    font-size: 10px; color: #888; margin-top: 4px;
+    text-align: center; white-space: nowrap; overflow: hidden;
+  }
+  .tile-card.valid .label { color: #8c8; }
+
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: none; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .modal-bg.active { display: flex; }
+  .modal {
+    background: #15152a;
+    border: 1px solid #444;
+    padding: 16px;
+    border-radius: 4px;
+    min-width: 360px;
+    max-width: 80vw;
+    max-height: 80vh;
+    display: flex; flex-direction: column; gap: 8px;
+    overflow: hidden;
+  }
+  .modal h2 { font-size: 13px; color: #7af; text-transform: uppercase; letter-spacing: 1px; }
+  .modal .row { display: flex; gap: 6px; }
+  .modal .row.list {
+    flex-direction: column; gap: 4px;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid #333; background: #0a0a14;
+    min-height: 100px;
+  }
+  .saved-set {
+    display: flex; gap: 6px; align-items: center;
+    padding: 4px 6px;
+    border: 1px solid #2a2a40; background: #11111c; border-radius: 3px;
+    font-size: 12px;
+  }
+  .saved-set .name { flex: 1; color: #ccc; }
+  .saved-set button { padding: 2px 8px; font-size: 11px; }
+
+  #status {
+    position: absolute;
+    bottom: 178px;
+    left: 12px;
+    font-size: 11px;
+    color: #666;
+    pointer-events: none;
+    z-index: 5;
+    line-height: 1.4;
+    background: rgba(10,10,20,0.8);
+    padding: 6px 8px;
+    border-radius: 3px;
+    border: 1px solid #222;
+  }
+  #status .key { color: #7af; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <h1>Ornament Builder</h1>
+  <button id="btn-new">New</button>
+  <button id="btn-export">Export SVG</button>
+  <button id="btn-save">Save Set</button>
+  <button id="btn-load">Load Set</button>
+  <span class="spacer"></span>
+  <span class="hint">scroll to zoom · middle/right drag to pan · click+drag tiles · <span style="color:#aaa">M</span> mirror · <span style="color:#aaa">Del</span> remove</span>
+</div>
+
+<div id="stage">
+  <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div id="status">Loading manifest...</div>
+</div>
+
+<div id="palette"></div>
+
+<div class="modal-bg" id="modal-save">
+  <div class="modal">
+    <h2>Save Tile Set</h2>
+    <input type="text" id="save-name" placeholder="Name this set..."
+           style="background:#0a0a14;color:#ccc;border:1px solid #333;padding:6px;font-family:monospace;font-size:12px;">
+    <div class="row" style="justify-content: flex-end;">
+      <button onclick="closeModal('modal-save')">Cancel</button>
+      <button onclick="confirmSaveSet()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-load">
+  <div class="modal">
+    <h2>Load Tile Set</h2>
+    <div class="row list" id="saved-sets-list"></div>
+    <div class="row" style="justify-content: space-between;">
+      <button id="btn-import-file">Import JSON file</button>
+      <button onclick="closeModal('modal-load')">Close</button>
+    </div>
+    <input type="file" id="file-input" accept=".json" style="display:none">
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
