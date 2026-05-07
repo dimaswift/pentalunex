@@ -9,7 +9,9 @@ Typical flow:
 The overlay command reads ``export/vector_tiles/manifest.json`` and writes a
 sparse folder of SVGs only for tiles touched by the eclipse geometry. Each SVG
 contains an eclipse polygon layer and an overlapping graticule-cell stroke
-layer. The merge command combines those overlays with the corresponding base
+layer. The projection math is routed through qscsvg.cgrcs so the emitted
+manifest records the CGRCS frame, gnomonic projection policy, and cell address
+scheme. The merge command combines those overlays with the corresponding base
 vector tile SVGs.
 """
 
@@ -28,12 +30,20 @@ from typing import Any, Iterable, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from qscsvg import ProjectionOffset, get_eclipse
-from qscsvg.geometry import densify_lonlat_segment, oriented_lonlat_to_vec3, to_face_xyz
+from qscsvg import get_eclipse
+from qscsvg.cgrcs import (
+    GraticuleCell,
+    ReferenceFrame,
+    cgrcs_manifest,
+    densify_lonlat_ring,
+    graticule_cell_face_xy as cgrcs_graticule_cell_face_xy,
+    graticule_cell_index,
+    project_lonlat_ring_to_face_xy,
+    reference_frame_from_projection_offset,
+)
 from vectorize_tiles import polyline_path
 
 
-FACE_CLIP_EPS = 0.02
 SVG_NS = "http://www.w3.org/2000/svg"
 
 
@@ -59,13 +69,6 @@ class TileTransform:
     v_axis: Point
 
 
-@dataclass(frozen=True, order=True)
-class GraticuleCell:
-    face: int
-    lon_idx: int
-    lat_idx: int
-
-
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -74,13 +77,18 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def projection_offset_from_manifest(manifest: dict[str, Any]) -> ProjectionOffset:
+def projection_offset_from_manifest(manifest: dict[str, Any]) -> dict[str, float]:
     data = manifest.get("projection_offset") or {}
-    return ProjectionOffset(
-        float(data.get("lon", 0.0)),
-        float(data.get("lat", 0.0)),
-        float(data.get("roll", 0.0)),
-    )
+    return {
+        "lon": float(data.get("lon", 0.0)),
+        "lat": float(data.get("lat", 0.0)),
+        "roll": float(data.get("roll", 0.0)),
+    }
+
+
+def reference_frame_from_manifest(manifest: dict[str, Any]) -> ReferenceFrame:
+    offset = projection_offset_from_manifest(manifest)
+    return reference_frame_from_projection_offset(offset["lon"], offset["lat"], offset["roll"])
 
 
 def graticule_step_from_manifest(manifest: dict[str, Any]) -> float:
@@ -162,116 +170,11 @@ def polygon_rings(geometry: dict[str, Any]) -> Iterable[list[Sequence[Sequence[f
         raise ValueError(f"expected Polygon or MultiPolygon, got {gtype!r}")
 
 
-def densify_ring(ring: Sequence[Sequence[float]], max_step_deg: float) -> list[Point]:
-    pts = [(float(p[0]), float(p[1])) for p in ring]
-    if pts and pts[0] != pts[-1]:
-        pts.append(pts[0])
-    out: list[Point] = []
-    for a, b in zip(pts, pts[1:]):
-        segment = densify_lonlat_segment(a, b, max_step_deg=max_step_deg)
-        if out:
-            segment = segment[1:]
-        out.extend(segment)
-    return out
-
-
-def interp_z(a: Sequence[float], b: Sequence[float]) -> tuple[float, float, float]:
-    t = (FACE_CLIP_EPS - a[2]) / (b[2] - a[2])
-    return (
-        a[0] + t * (b[0] - a[0]),
-        a[1] + t * (b[1] - a[1]),
-        FACE_CLIP_EPS,
-    )
-
-
-def clip_ring_z(ring: Sequence[Sequence[float]]) -> list[tuple[float, float, float]]:
-    if not ring:
-        return []
-    out: list[tuple[float, float, float]] = []
-    prev = ring[-1]
-    prev_in = prev[2] >= FACE_CLIP_EPS
-    for cur in ring:
-        cur_in = cur[2] >= FACE_CLIP_EPS
-        if cur_in:
-            if not prev_in:
-                out.append(interp_z(prev, cur))
-            out.append((cur[0], cur[1], cur[2]))
-        elif prev_in:
-            out.append(interp_z(prev, cur))
-        prev = cur
-        prev_in = cur_in
-    return out
-
-
-def project_lonlat_ring_to_face(
-    face: int,
-    ring: Sequence[Sequence[float]],
-    *,
-    offset: ProjectionOffset,
-    max_step_deg: float,
-) -> list[Point]:
-    ring3 = [
-        to_face_xyz(face, oriented_lonlat_to_vec3(lon, lat, offset))
-        for lon, lat in densify_ring(ring, max_step_deg)
-    ]
-    projected = []
-    for p in clip_ring_z(ring3):
-        x = p[0] / p[2]
-        y = p[1] / p[2]
-        if math.isfinite(x) and math.isfinite(y):
-            projected.append((x, y))
-    return projected
-
-
-def clip_against_edge(points: Sequence[Point], inside, intersect) -> list[Point]:
-    if not points:
-        return []
-    output: list[Point] = []
-    prev = points[-1]
-    prev_inside = inside(prev)
-    for curr in points:
-        curr_inside = inside(curr)
-        if curr_inside:
-            if not prev_inside:
-                output.append(intersect(prev, curr))
-            output.append(curr)
-        elif prev_inside:
-            output.append(intersect(prev, curr))
-        prev = curr
-        prev_inside = curr_inside
-    return output
-
-
-def clip_polygon_to_face(points: Sequence[Point]) -> list[Point]:
-    clipped = list(points)
-    clipped = clip_against_edge(
-        clipped,
-        lambda p: p[0] >= -1.0,
-        lambda a, b: (-1.0, a[1] + (b[1] - a[1]) * ((-1.0 - a[0]) / (b[0] - a[0]))),
-    )
-    clipped = clip_against_edge(
-        clipped,
-        lambda p: p[0] <= 1.0,
-        lambda a, b: (1.0, a[1] + (b[1] - a[1]) * ((1.0 - a[0]) / (b[0] - a[0]))),
-    )
-    clipped = clip_against_edge(
-        clipped,
-        lambda p: p[1] >= -1.0,
-        lambda a, b: (a[0] + (b[0] - a[0]) * ((-1.0 - a[1]) / (b[1] - a[1])), -1.0),
-    )
-    clipped = clip_against_edge(
-        clipped,
-        lambda p: p[1] <= 1.0,
-        lambda a, b: (a[0] + (b[0] - a[0]) * ((1.0 - a[1]) / (b[1] - a[1])), 1.0),
-    )
-    return clipped
-
-
 def face_polygons(
     geometry: dict[str, Any],
     face: int,
     *,
-    offset: ProjectionOffset,
+    frame: ReferenceFrame,
     max_step_deg: float,
 ) -> list[list[Point]]:
     polygons = []
@@ -280,10 +183,15 @@ def face_polygons(
             continue
         # Eclipse polygons are simple bands in this project; holes are rare and
         # ignored here to keep the overlay path independent from Shapely.
-        projected = project_lonlat_ring_to_face(face, rings[0], offset=offset, max_step_deg=max_step_deg)
-        clipped = clip_polygon_to_face(projected)
-        if len(clipped) >= 3:
-            polygons.append(clipped)
+        projected = project_lonlat_ring_to_face_xy(
+            face,
+            rings[0],
+            frame,
+            max_step_deg=max_step_deg,
+            clip_to_face=True,
+        )
+        if len(projected) >= 3:
+            polygons.append(projected)
     return polygons
 
 
@@ -336,79 +244,28 @@ def polygons_overlap(a: Sequence[Point], b: Sequence[Point]) -> bool:
     return False
 
 
-def graticule_cell_index(lon: float, lat: float, step: float) -> tuple[int, int]:
-    lon_count = max(1, int(math.ceil(360.0 / step)))
-    lat_count = max(1, int(math.ceil(180.0 / step)))
-    lon_idx = math.floor((lon + 180.0) / step)
-    lat_idx = math.floor((lat + 90.0) / step)
-    return (
-        max(0, min(lon_count - 1, lon_idx)),
-        max(0, min(lat_count - 1, lat_idx)),
-    )
-
-
-def graticule_cell_lonlat_ring(lon_idx: int, lat_idx: int, step: float) -> list[Point]:
-    lon0 = -180.0 + lon_idx * step
-    lon1 = lon0 + step
-    lat0 = -90.0 + lat_idx * step
-    lat1 = lat0 + step
-    ring: list[Point] = []
-
-    for i in range(11):
-        lon = lon0 + (lon1 - lon0) * i / 10.0
-        ring.append((lon, lat0))
-    for i in range(1, 11):
-        lat = lat0 + (lat1 - lat0) * i / 10.0
-        ring.append((lon1, lat))
-    for i in range(9, -1, -1):
-        lon = lon0 + (lon1 - lon0) * i / 10.0
-        ring.append((lon, lat1))
-    for i in range(9, 0, -1):
-        lat = lat0 + (lat1 - lat0) * i / 10.0
-        ring.append((lon0, lat))
-    return ring
-
-
-def graticule_cell_face_xy(
-    face: int,
-    lon_idx: int,
-    lat_idx: int,
-    step: float,
-    *,
-    offset: ProjectionOffset,
-) -> list[Point]:
-    ring = graticule_cell_lonlat_ring(lon_idx, lat_idx, step)
-    projected = project_lonlat_ring_to_face(
-        face,
-        ring,
-        offset=offset,
-        max_step_deg=step / 10.0,
-    )
-    return clip_polygon_to_face(projected)
-
-
 def overlapping_cells(
     face: int,
     polygons: Sequence[Sequence[Point]],
     *,
     step: float,
-    offset: ProjectionOffset,
+    frame: ReferenceFrame,
 ) -> list[GraticuleCell]:
     hits = []
     lon_count = max(1, int(math.ceil(360.0 / step)))
     lat_count = max(1, int(math.ceil(180.0 / step)))
     for lon_idx in range(lon_count):
         for lat_idx in range(lat_count):
-            ring = graticule_cell_face_xy(face, lon_idx, lat_idx, step, offset=offset)
+            cell = GraticuleCell(face, lon_idx, lat_idx)
+            ring = cgrcs_graticule_cell_face_xy(cell, step, frame)
             if len(ring) >= 3 and any(polygons_overlap(ring, poly) for poly in polygons):
-                hits.append(GraticuleCell(face, lon_idx, lat_idx))
+                hits.append(cell)
     return hits
 
 
 def boundary_cells_from_lonlat(
     geometry: dict[str, Any],
     *,
-    offset: ProjectionOffset,
     allowed: set[GraticuleCell],
     max_step_deg: float,
     step: float,
@@ -419,7 +276,7 @@ def boundary_cells_from_lonlat(
     for rings in polygon_rings(geometry):
         if not rings:
             continue
-        for lon, lat in densify_ring(rings[0], max_step_deg):
+        for lon, lat in densify_lonlat_ring(rings[0], max_step_deg):
             lon_idx, lat_idx = graticule_cell_index(lon, lat, step)
             cell = GraticuleCell(face, lon_idx, lat_idx)
             if cell in allowed and cell not in seen:
@@ -470,17 +327,11 @@ def cell_to_tile_path(
     cell: GraticuleCell,
     transform: TileTransform,
     *,
-    offset: ProjectionOffset,
+    frame: ReferenceFrame,
     step: float,
     precision: int,
 ) -> str:
-    ring = graticule_cell_face_xy(
-        cell.face,
-        cell.lon_idx,
-        cell.lat_idx,
-        step,
-        offset=offset,
-    )
+    ring = cgrcs_graticule_cell_face_xy(cell, step, frame)
     return polyline_path(
         [face_xy_to_tile(p, transform) for p in ring],
         precision=precision,
@@ -489,7 +340,7 @@ def cell_to_tile_path(
 
 
 def cell_key(cell: GraticuleCell) -> str:
-    return f"{cell.face}:{cell.lon_idx}:{cell.lat_idx}"
+    return cell.key()
 
 
 def overlay_svg(
@@ -522,6 +373,7 @@ def generate_overlays(args: argparse.Namespace) -> None:
     manifest_path = args.tiles_dir / "manifest.json"
     manifest = load_json(manifest_path)
     offset = projection_offset_from_manifest(manifest)
+    frame = reference_frame_from_manifest(manifest)
     graticule_step = graticule_step_from_manifest(manifest)
     eclipses = load_eclipses(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -537,7 +389,7 @@ def generate_overlays(args: argparse.Namespace) -> None:
             polys = face_polygons(
                 eclipse.geometry,
                 transform.face,
-                offset=offset,
+                frame=frame,
                 max_step_deg=args.max_step_deg,
             )
             if not polys:
@@ -547,12 +399,11 @@ def generate_overlays(args: argparse.Namespace) -> None:
                 transform.face,
                 polys,
                 step=graticule_step,
-                offset=offset,
+                frame=frame,
             )
             allowed = set(cells)
             ordered = boundary_cells_from_lonlat(
                 eclipse.geometry,
-                offset=offset,
                 allowed=allowed,
                 max_step_deg=max(args.max_step_deg, 1.0),
                 step=graticule_step,
@@ -573,7 +424,7 @@ def generate_overlays(args: argparse.Namespace) -> None:
             for cell in ordered:
                 all_cell_paths.append(
                     f'<path data-eclipse="{html.escape(eclipse.id)}" data-cell="{cell_key(cell)}" '
-                    f'd="{cell_to_tile_path(cell, transform, offset=offset, step=graticule_step, precision=args.svg_precision)}"/>'
+                    f'd="{cell_to_tile_path(cell, transform, frame=frame, step=graticule_step, precision=args.svg_precision)}"/>'
                 )
             eclipse_hits.append({
                 "id": eclipse.id,
@@ -613,13 +464,19 @@ def generate_overlays(args: argparse.Namespace) -> None:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "kind": "eclipse_tile_overlays",
         "source_tiles": str(args.tiles_dir),
-        "projection_offset": {"lon": offset.lon, "lat": offset.lat, "roll": offset.roll},
+        "projection_offset": offset,
+        "reference_frame": frame.to_manifest(),
+        "cgrcs": cgrcs_manifest(),
         "coordinate_system": {
+            "system": "CGRCS:v1",
             "tile_mapping": "manifest polygon affine",
+            "projection": "cube gnomonic",
+            "frame_policy": "projection_offset frames are custom CGRCS frames; canonical F/E/V frames are enumerated by qscsvg.cgrcs",
             "cell_system": "lonlat graticule",
             "cell_key": "face:lonIdx:latIdx",
             "step_deg": graticule_step,
-            "face_clip_eps": FACE_CLIP_EPS,
+            "face_clip_eps": 0.02,
+            "distortion_policy": "preserve gnomonic lensing per frame; fairness comes from frame ensemble",
         },
         "eclipses": [
             {
@@ -688,6 +545,8 @@ def merge_folders(args: argparse.Namespace) -> None:
         "base_tiles": str(args.base_dir),
         "overlay_tiles": str(args.overlay_dir),
         "source_projection_offset": base_manifest.get("projection_offset"),
+        "reference_frame": overlay_manifest.get("reference_frame"),
+        "cgrcs": overlay_manifest.get("cgrcs"),
         "coordinate_system": overlay_manifest.get("coordinate_system"),
         "eclipses": overlay_manifest.get("eclipses", []),
         "asset_count": len(merged_assets),

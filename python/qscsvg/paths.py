@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-import math
 from typing import Any
 
 MultiPolygon = None
@@ -13,17 +12,13 @@ unary_union = None
 make_valid = None
 
 from .cells import CellId, all_cells, cell_at_lonlat, cell_ring_face_xy, cell_ring_lonlat, cells_for_face
+from .cgrcs import project_lonlat_ring_to_face_xy, reference_frame_from_offset
 from .geometry import (
     ProjectionOffset,
     densify_lonlat_segment,
-    oriented_lonlat_to_vec3,
     pixel_to_face_xy,
-    to_face_xyz,
     unwrap_ring,
 )
-
-
-FACE_CLIP_EPS = 1e-8
 
 
 def _require_shapely() -> None:
@@ -83,34 +78,20 @@ def _iter_polygons(geom) -> Iterable:
             yield from _iter_polygons(part)
 
 
-def _densify_ring(ring: Sequence[Sequence[float]], max_step_deg: float) -> list[tuple[float, float]]:
-    pts = [(float(p[0]), float(p[1])) for p in ring]
-    if pts and pts[0] != pts[-1]:
-        pts.append(pts[0])
-    out: list[tuple[float, float]] = []
-    for a, b in zip(pts, pts[1:]):
-        segment = densify_lonlat_segment(a, b, max_step_deg=max_step_deg)
-        if out:
-            segment = segment[1:]
-        out.extend(segment)
-    return out
-
-
 def _project_lonlat_ring_to_face(
     face: int,
     ring: Sequence[Sequence[float]],
     max_step_deg: float,
     projection_offset: ProjectionOffset | Sequence[float] | None = None,
 ) -> list[tuple[float, float]]:
-    out: list[tuple[float, float]] = []
-    for lon, lat in _densify_ring(ring, max_step_deg):
-        p = to_face_xyz(face, oriented_lonlat_to_vec3(lon, lat, projection_offset))
-        if p[2] <= FACE_CLIP_EPS:
-            continue
-        x = p[0] / p[2]
-        y = p[1] / p[2]
-        if math.isfinite(x) and math.isfinite(y):
-            out.append((x, y))
+    frame = reference_frame_from_offset(projection_offset)
+    out = project_lonlat_ring_to_face_xy(
+        face,
+        ring,
+        frame,
+        max_step_deg=max_step_deg,
+        clip_to_face=False,
+    )
     if len(out) >= 2 and out[0] != out[-1]:
         out.append(out[0])
     return out

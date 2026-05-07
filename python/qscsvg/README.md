@@ -3,6 +3,25 @@
 Python utilities for generating SVG graticules, graticule cells, and eclipse-path
 cell overlays on a Quadrilateralized Spherical Cube.
 
+## CGRCS Coordinate Core
+
+The package now exposes a Cube-Gnomonic Reference Coordinate System core in
+`qscsvg.cgrcs`. This is the canonical coordinate layer for new tile/card
+pipeline work:
+
+- `ReferenceFrame.canonical("F" | "E" | "V", spin_index)` creates one of the
+  18 canonical frames.
+- `ReferenceFrame.from_projection_offset(lon, lat, roll)` preserves the
+  existing browser/export offset behavior as a custom CGRCS frame.
+- `project_to_cube()` and `unproject_from_cube()` convert between geographic
+  points and face-local `u,v` coordinates.
+- `enumerate_rhomb_addresses()` returns the full 864-state canonical rhomb
+  library: 18 frames x 8 iso views x 3 visible faces x 2 polarities.
+
+The gnomonic lensing is intentional. Individual frames are allowed to stretch or
+dramatize regions; representation fairness comes from the complete canonical
+frame ensemble.
+
 The package intentionally uses the same face IDs as the JavaScript viewer:
 
 - `0`: north pole
