@@ -127,15 +127,15 @@
       </div>
       <div class="row">
         <label for="lon-offset">Lon offset <span id="lon-offset-val">0°</span></label>
-        <input type="range" id="lon-offset" min="-180" max="180" step="0.5" value="0">
+        <input type="range" id="lon-offset" min="-180" max="180" step="15" value="0">
       </div>
       <div class="row">
         <label for="lat-offset">Lat offset <span id="lat-offset-val">0°</span></label>
-        <input type="range" id="lat-offset" min="-89" max="89" step="0.5" value="0">
+        <input type="range" id="lat-offset" min="0" max="90" step="0.01" value="35.264">
       </div>
       <div class="row">
         <label for="roll-offset">Roll offset <span id="roll-offset-val">0°</span></label>
-        <input type="range" id="roll-offset" min="-180" max="180" step="0.5" value="0">
+        <input type="range" id="roll-offset" min="-180" max="180" step="0.5" value="45">
       </div>
       <button id="btn-render">Render Textures</button>
     </div>

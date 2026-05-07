@@ -7,7 +7,7 @@
 export const DEG = Math.PI / 180;
 const RAD = 180 / Math.PI;
 
-const projectionOffset = { lon: 0, lat: 0, roll: 0 };
+const projectionOffset = { lon: 0, lat: 35.264, roll: 45 };
 
 export function setProjectionOffsets(lon = 0, lat = 0, roll = 0) {
   projectionOffset.lon = Number.isFinite(lon) ? lon : 0;
