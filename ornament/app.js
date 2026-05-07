@@ -3,8 +3,8 @@
 // adjacency rules ("bonds") to snap tiles together by shared 3D edges.
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const MANIFEST_URL = "../export/vector_tiles/manifest.json";
-const TILE_BASE = "../export/vector_tiles/";
+const MANIFEST_URL = "./export/vector_tiles/manifest.json";
+const TILE_BASE = "./export/vector_tiles/";
 const STORAGE_KEY = "ornament_builder_sets_v1";
 // Always snap to closest valid bond — no distance cap.
 
@@ -194,7 +194,6 @@ function findSnap(candidateAssetId, canvasPt, opts = {}) {
       const ae = placedEdgeCanvas(placed, edgeName);
       const midA = [(ae.from[0] + ae.to[0]) / 2, (ae.from[1] + ae.to[1]) / 2];
       const d = dist(canvasPt, midA);
-      if (d > SNAP_DISTANCE_PX / state.view.scale) continue;
 
       const bondList = state.bondsByEdge[`${placedAsset.face},${edgeName}`] || [];
       for (const bond of bondList) {
