@@ -446,9 +446,9 @@ def write_vector_manifest(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tiles-dir", type=Path, default=Path("export/tiles"))
-    parser.add_argument("--manifest", type=Path, default=Path("export/manifest.json"))
-    parser.add_argument("--out-dir", type=Path, default=Path("export/vector_tiles"))
+    parser.add_argument("--tiles-dir", type=Path, default=Path("/ornament/export/tiles"))
+    parser.add_argument("--manifest", type=Path, default=Path("/ornament/export/tiles//manifest.json"))
+    parser.add_argument("--out-dir", type=Path, default=Path("/ornament/export/vector_tiles"))
     parser.add_argument("--glob", default="*_map.png")
     parser.add_argument("--limit", type=int, default=0)
 

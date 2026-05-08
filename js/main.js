@@ -644,6 +644,16 @@ const CORNER_VISIBLE_FACES = [
   [5, 3, 4], [5, 3, 2], [0, 3, 4], [0, 3, 2],
   [5, 1, 4], [5, 1, 2], [0, 1, 4], [0, 1, 2],
 ];
+const UNIQUE_CORNER_FACE_PAIRS = [
+  [2, 0], [3, 0],
+  [4, 1], [5, 1],
+  [1, 2], [3, 2],
+  [0, 3], [1, 3],
+  [0, 4], [2, 4],
+  [0, 5], [1, 5],
+];
+const EDGE_VIEW_CODES = ['E+++', 'E++-', 'E+-+', 'E+--', 'E-++', 'E-+-', 'E--+', 'E---'];
+const HEAD_ON_VIEW_CODES = ['F+Z', 'F+X', 'F+Y', 'F-X', 'F-Y', 'F-Z'];
 const FACE_EDGE_DEFS = [
   { name: 'top',    from: [-0.5,  0.5], to: [ 0.5,  0.5] },
   { name: 'right',  from: [ 0.5,  0.5], to: [ 0.5, -0.5] },
@@ -1197,6 +1207,8 @@ function buildTileSandboxManifest(size, assets) {
       render_size: size,
       frustum_half: FRUSTUM_HALF,
       asset_count: assets.length,
+      corner_face_policy: 'deduplicated to 12 canonical rotation classes',
+      unique_corner_face_count: UNIQUE_CORNER_FACE_PAIRS.length,
       corners: CORNER_LABELS.map((label, index) => ({
         index,
         label,
@@ -1211,6 +1223,30 @@ function buildTileSandboxManifest(size, assets) {
       alpha: gratState.alpha,
     },
     projection_offset: getProjectionOffsets(),
+    cgrcs: {
+      system: 'CGRCS:v1',
+      projection: 'cube gnomonic',
+      view_families: {
+        corner_face: {
+          unique_count: UNIQUE_CORNER_FACE_PAIRS.length,
+          canonical_pairs: UNIQUE_CORNER_FACE_PAIRS.map(([corner, face]) => ({ corner, face })),
+          description: 'orientation-normalized corner-view rhombs; 24 legacy corner/face exports collapse to 12 rotation classes',
+        },
+        edge: {
+          unique_count: EDGE_VIEW_CODES.length,
+          views: EDGE_VIEW_CODES,
+          description: 'side views with a cube edge centered; two faces visible',
+        },
+        face: {
+          unique_count: HEAD_ON_VIEW_CODES.length,
+          views: HEAD_ON_VIEW_CODES,
+          description: 'head-on single-face views',
+        },
+      },
+      canonical_view_state_count: UNIQUE_CORNER_FACE_PAIRS.length + EDGE_VIEW_CODES.length + HEAD_ON_VIEW_CODES.length,
+      canonical_view_card_count: 18 * (UNIQUE_CORNER_FACE_PAIRS.length + EDGE_VIEW_CODES.length + HEAD_ON_VIEW_CODES.length) * 2,
+      distortion_policy: 'preserve gnomonic lensing per frame; fairness comes from frame ensemble',
+    },
     variants: {
       normal: { parity: 1, description: 'Rendered shard as exported.' },
       mirror: {
@@ -1272,17 +1308,15 @@ async function exportTileSandboxZip() {
     progress.textContent = 'Measuring shard rotations…';
     const jobs = [];
     let targetWidth = 0, targetHeight = 0;
-    for (let cornerIdx = 0; cornerIdx < CORNER_VISIBLE_FACES.length; cornerIdx++) {
-      for (const faceIdx of CORNER_VISIBLE_FACES[cornerIdx]) {
-        const ctx = setupIsometricRender(cornerIdx, size, { faceIdx });
-        try {
-          const frame = buildRotationFrame(sourceFaceCorners(ctx, faceIdx));
-          targetWidth = Math.max(targetWidth, frame.tightWidth);
-          targetHeight = Math.max(targetHeight, frame.tightHeight);
-          jobs.push({ cornerIdx, faceIdx });
-        } finally {
-          ctx.restore();
-        }
+    for (const [cornerIdx, faceIdx] of UNIQUE_CORNER_FACE_PAIRS) {
+      const ctx = setupIsometricRender(cornerIdx, size, { faceIdx });
+      try {
+        const frame = buildRotationFrame(sourceFaceCorners(ctx, faceIdx));
+        targetWidth = Math.max(targetWidth, frame.tightWidth);
+        targetHeight = Math.max(targetHeight, frame.tightHeight);
+        jobs.push({ cornerIdx, faceIdx });
+      } finally {
+        ctx.restore();
       }
     }
 

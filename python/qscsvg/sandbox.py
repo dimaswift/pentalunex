@@ -10,6 +10,7 @@ from typing import Any, Iterable, Sequence
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from .cells import CellId
+from .cgrcs import UNIQUE_CORNER_FACE_PAIRS, cgrcs_manifest
 from .geometry import FACE_NAMES, ProjectionOffset
 from .svg import (
     FACE_CORNER_NAMES,
@@ -184,8 +185,9 @@ def export_tile_sandbox_zip(
     roll_offset: float = 0,
     projection_offset: ProjectionOffset | Sequence[float] | None = None,
     include_mirrors: bool = True,
+    include_duplicate_corner_faces: bool = False,
 ) -> Path:
-    """Write a tile-sandbox ZIP containing 24 normalized rhombs plus mirrors."""
+    """Write a tile-sandbox ZIP containing 12 canonical rhombs plus mirrors."""
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -194,14 +196,22 @@ def export_tile_sandbox_zip(
     jobs: list[tuple[int, int]] = []
     target_width = 0.0
     target_height = 0.0
-    for corner in range(8):
+    source_jobs = (
+        [
+            (corner, face)
+            for corner in range(8)
+            for face in visible_faces_for_corner(corner)
+        ]
+        if include_duplicate_corner_faces
+        else list(UNIQUE_CORNER_FACE_PAIRS)
+    )
+    for corner, face in source_jobs:
         project, _ = _iso_projector(corner)
-        for face in visible_faces_for_corner(corner):
-            corners = _iso_face_corners(face, project, scale)
-            frame = _rotation_frame(corners)
-            jobs.append((corner, face))
-            target_width = max(target_width, frame["tight_width"])
-            target_height = max(target_height, frame["tight_height"])
+        corners = _iso_face_corners(face, project, scale)
+        frame = _rotation_frame(corners)
+        jobs.append((corner, face))
+        target_width = max(target_width, frame["tight_width"])
+        target_height = max(target_height, frame["tight_height"])
 
     assets: list[dict[str, Any]] = []
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as zip_file:
@@ -263,6 +273,12 @@ def export_tile_sandbox_zip(
                 "asset_count": len(assets),
                 "normal_asset_count": len(jobs),
                 "mirror_asset_count": len(jobs) if include_mirrors else 0,
+                "include_duplicate_corner_faces": include_duplicate_corner_faces,
+                "corner_face_policy": (
+                    "deduplicated to 12 canonical rotation classes"
+                    if not include_duplicate_corner_faces
+                    else "legacy 24 corner/face exports"
+                ),
                 "corners": [
                     {
                         "index": index,
@@ -277,6 +293,7 @@ def export_tile_sandbox_zip(
                 "lat": offset.lat,
                 "roll": offset.roll,
             },
+            "cgrcs": cgrcs_manifest(),
             "canonical_orientation": {
                 "primary_edge": "visual left edge after original isometric render",
                 "edge_index_order": "starts at primary_edge, then follows top/right/bottom/left clockwise order",

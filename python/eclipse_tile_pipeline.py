@@ -38,6 +38,7 @@ from qscsvg.cgrcs import (
     densify_lonlat_ring,
     graticule_cell_face_xy as cgrcs_graticule_cell_face_xy,
     graticule_cell_index,
+    is_canonical_corner_face_pair,
     project_lonlat_ring_to_face_xy,
     reference_frame_from_projection_offset,
 )
@@ -369,6 +370,22 @@ def asset_svg_name(asset: dict[str, Any]) -> str:
     return f"iso_corner{asset['corner']}_face{asset['face']}.svg"
 
 
+def clean_generated_svgs(out_dir: Path) -> None:
+    for path in out_dir.glob("iso_*.svg"):
+        path.unlink()
+
+
+def should_process_asset(asset: dict[str, Any], args: argparse.Namespace) -> bool:
+    if args.include_duplicate_corner_faces:
+        return True
+    if "corner" not in asset or "face" not in asset:
+        return True
+    try:
+        return is_canonical_corner_face_pair(int(asset["corner"]), int(asset["face"]))
+    except ValueError:
+        return True
+
+
 def generate_overlays(args: argparse.Namespace) -> None:
     manifest_path = args.tiles_dir / "manifest.json"
     manifest = load_json(manifest_path)
@@ -377,9 +394,15 @@ def generate_overlays(args: argparse.Namespace) -> None:
     graticule_step = graticule_step_from_manifest(manifest)
     eclipses = load_eclipses(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    clean_generated_svgs(args.out_dir)
 
     overlay_assets = []
+    skipped_duplicate_assets = 0
     for asset in manifest.get("assets", []):
+        if not should_process_asset(asset, args):
+            skipped_duplicate_assets += 1
+            continue
+
         transform = tile_transform(asset)
         path_groups: list[str] = []
         all_cell_paths: list[str] = []
@@ -472,6 +495,8 @@ def generate_overlays(args: argparse.Namespace) -> None:
             "tile_mapping": "manifest polygon affine",
             "projection": "cube gnomonic",
             "frame_policy": "projection_offset frames are custom CGRCS frames; canonical F/E/V frames are enumerated by qscsvg.cgrcs",
+            "corner_face_policy": "deduplicated by default: 24 corner/face exports collapse to 12 rotation classes",
+            "include_duplicate_corner_faces": args.include_duplicate_corner_faces,
             "cell_system": "lonlat graticule",
             "cell_key": "face:lonIdx:latIdx",
             "step_deg": graticule_step,
@@ -492,10 +517,12 @@ def generate_overlays(args: argparse.Namespace) -> None:
             "cell_stroke": args.cell_stroke,
         },
         "asset_count": len(overlay_assets),
+        "skipped_duplicate_asset_count": skipped_duplicate_assets,
         "assets": overlay_assets,
     }
     write_json(args.out_dir / "manifest.json", overlay_manifest)
-    print(f"wrote {len(overlay_assets)} eclipse overlay SVGs to {args.out_dir}")
+    skipped = f"; skipped {skipped_duplicate_assets} duplicate corner-face assets" if skipped_duplicate_assets else ""
+    print(f"wrote {len(overlay_assets)} eclipse overlay SVGs to {args.out_dir}{skipped}")
 
 
 def svg_inner(svg: str) -> str:
@@ -514,6 +541,7 @@ def merge_folders(args: argparse.Namespace) -> None:
     base_manifest = load_json(args.base_dir / "manifest.json")
     overlay_manifest = load_json(args.overlay_dir / "manifest.json")
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    clean_generated_svgs(args.out_dir)
 
     merged_assets = []
     for overlay_asset in overlay_manifest.get("assets", []):
@@ -550,6 +578,7 @@ def merge_folders(args: argparse.Namespace) -> None:
         "coordinate_system": overlay_manifest.get("coordinate_system"),
         "eclipses": overlay_manifest.get("eclipses", []),
         "asset_count": len(merged_assets),
+        "skipped_duplicate_asset_count": overlay_manifest.get("skipped_duplicate_asset_count", 0),
         "assets": merged_assets,
     }
     write_json(args.out_dir / "manifest.json", merged_manifest)
@@ -570,6 +599,11 @@ def add_overlay_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cell-stroke", default="#111111")
     parser.add_argument("--cell-stroke-width", default="2")
     parser.add_argument("--cell-opacity", default="0.75")
+    parser.add_argument(
+        "--include-duplicate-corner-faces",
+        action="store_true",
+        help="process all 24 legacy corner/face assets instead of the 12 canonical rotation classes",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

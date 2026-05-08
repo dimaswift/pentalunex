@@ -31,6 +31,7 @@ RAD = 180.0 / math.pi
 PoleClass = Literal["F", "E", "V"]
 Polarity = Literal["Terra", "Umbra"]
 BoundaryClass = Literal["interior", "edge", "vertex"]
+ViewFamily = Literal["corner_face", "edge", "face"]
 
 Vec3 = tuple[float, float, float]
 Point = tuple[float, float]
@@ -66,6 +67,32 @@ POLE_DIRECTIONS: dict[PoleClass, Vec3] = {
 
 SPIN_DEGREES = (0.0, 15.0, 30.0, 45.0, 60.0, 75.0)
 ISO_VIEWS = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")
+EDGE_VIEW_CODES = ("E+++", "E++-", "E+-+", "E+--", "E-++", "E-+-", "E--+", "E---")
+HEAD_ON_VIEW_CODES = ("F+Z", "F+X", "F+Y", "F-X", "F-Y", "F-Z")
+
+# Existing corner exports produce 8 * 3 = 24 face/rhomb assets, but orientation
+# normalization collapses them into two rotation classes per cube face. Each
+# group lists equivalent (corner, face) exports; the first pair is canonical.
+CORNER_FACE_GROUPS: tuple[tuple[tuple[int, int], ...], ...] = (
+    ((2, 0), (6, 0)),
+    ((3, 0), (7, 0)),
+    ((4, 1), (7, 1)),
+    ((5, 1), (6, 1)),
+    ((1, 2), (7, 2)),
+    ((3, 2), (5, 2)),
+    ((0, 3), (3, 3)),
+    ((1, 3), (2, 3)),
+    ((0, 4), (6, 4)),
+    ((2, 4), (4, 4)),
+    ((0, 5), (4, 5)),
+    ((1, 5), (5, 5)),
+)
+UNIQUE_CORNER_FACE_PAIRS = tuple(group[0] for group in CORNER_FACE_GROUPS)
+CORNER_FACE_CANONICAL = {
+    pair: group[0]
+    for group in CORNER_FACE_GROUPS
+    for pair in group
+}
 
 
 @dataclass(frozen=True)
@@ -156,6 +183,27 @@ class RhombAddress:
     def code(self) -> str:
         short_polarity = "T" if self.polarity == "Terra" else "U"
         return f"{self.frame}-I{self.iso_view}-{self.face_code}-{short_polarity}"
+
+
+@dataclass(frozen=True)
+class ViewState:
+    family: ViewFamily
+    code: str
+    visible_faces: tuple[int, ...]
+    corner: int | None = None
+    face: int | None = None
+    canonical_pair: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class ViewAddress:
+    frame: str
+    view: ViewState
+    polarity: Polarity = "Terra"
+
+    def code(self) -> str:
+        short_polarity = "T" if self.polarity == "Terra" else "U"
+        return f"{self.frame}-{self.view.code}-{short_polarity}"
 
 
 @dataclass(frozen=True)
@@ -619,6 +667,94 @@ def get_visible_faces(view: str) -> tuple[int, int, int]:
     )
 
 
+def canonical_corner_face_pair(corner: int, face: int) -> tuple[int, int]:
+    try:
+        return CORNER_FACE_CANONICAL[(int(corner), int(face))]
+    except KeyError as exc:
+        raise ValueError(f"face {face} is not visible from corner {corner}") from exc
+
+
+def is_canonical_corner_face_pair(corner: int, face: int) -> bool:
+    return canonical_corner_face_pair(corner, face) == (int(corner), int(face))
+
+
+def _sign_char(value: str) -> str:
+    if value not in ("+", "-"):
+        raise ValueError("view signs must be '+' or '-'")
+    return value
+
+
+def get_edge_view_visible_faces(view: str) -> tuple[int, int]:
+    if view not in EDGE_VIEW_CODES:
+        raise ValueError(f"edge view must be one of {EDGE_VIEW_CODES}")
+    sx = _sign_char(view[1])
+    sy = _sign_char(view[2])
+    return (
+        FACE_ID_BY_CODE["+X" if sx == "+" else "-X"],
+        FACE_ID_BY_CODE["+Y" if sy == "+" else "-Y"],
+    )
+
+
+def get_head_on_visible_faces(view: str) -> tuple[int]:
+    if view not in HEAD_ON_VIEW_CODES:
+        raise ValueError(f"head-on view must be one of {HEAD_ON_VIEW_CODES}")
+    return (FACE_ID_BY_CODE[view[1:]],)
+
+
+def enumerate_unique_corner_face_views() -> list[ViewState]:
+    out = []
+    for corner, face in UNIQUE_CORNER_FACE_PAIRS:
+        iso = ISO_VIEWS[corner]
+        out.append(ViewState(
+            family="corner_face",
+            code=f"I{iso}-{FACE_CODES[face]}",
+            visible_faces=(face,),
+            corner=corner,
+            face=face,
+            canonical_pair=(corner, face),
+        ))
+    return out
+
+
+def enumerate_edge_views() -> list[ViewState]:
+    return [
+        ViewState(
+            family="edge",
+            code=code,
+            visible_faces=get_edge_view_visible_faces(code),
+        )
+        for code in EDGE_VIEW_CODES
+    ]
+
+
+def enumerate_head_on_views() -> list[ViewState]:
+    return [
+        ViewState(
+            family="face",
+            code=code,
+            visible_faces=get_head_on_visible_faces(code),
+            face=get_head_on_visible_faces(code)[0],
+        )
+        for code in HEAD_ON_VIEW_CODES
+    ]
+
+
+def enumerate_view_states(
+    *,
+    include_corner_faces: bool = True,
+    include_edge_views: bool = True,
+    include_head_on_faces: bool = True,
+) -> list[ViewState]:
+    out: list[ViewState] = []
+    if include_corner_faces:
+        out.extend(enumerate_unique_corner_face_views())
+    if include_edge_views:
+        out.extend(enumerate_edge_views())
+    if include_head_on_faces:
+        out.extend(enumerate_head_on_views())
+    return out
+
+
 def make_rhomb_address(
     frame: ReferenceFrame,
     iso_view: str,
@@ -638,11 +774,32 @@ def enumerate_rhomb_addresses(
     polarities: tuple[Polarity, ...] = ("Terra", "Umbra") if include_polarities else ("Terra",)
     out: list[RhombAddress] = []
     for frame in enumerate_reference_frames():
-        for view in ISO_VIEWS:
-            for face in get_visible_faces(view):
-                for polarity in polarities:
-                    out.append(RhombAddress(frame=frame.code, iso_view=view, face=face, polarity=polarity))
+        for corner, face in UNIQUE_CORNER_FACE_PAIRS:
+            iso_view = ISO_VIEWS[corner]
+            for polarity in polarities:
+                out.append(RhombAddress(frame=frame.code, iso_view=iso_view, face=face, polarity=polarity))
     return out
+
+
+def enumerate_view_addresses(
+    *,
+    include_polarities: bool = True,
+    include_corner_faces: bool = True,
+    include_edge_views: bool = True,
+    include_head_on_faces: bool = True,
+) -> list[ViewAddress]:
+    polarities: tuple[Polarity, ...] = ("Terra", "Umbra") if include_polarities else ("Terra",)
+    views = enumerate_view_states(
+        include_corner_faces=include_corner_faces,
+        include_edge_views=include_edge_views,
+        include_head_on_faces=include_head_on_faces,
+    )
+    return [
+        ViewAddress(frame=frame.code, view=view, polarity=polarity)
+        for frame in enumerate_reference_frames()
+        for view in views
+        for polarity in polarities
+    ]
 
 
 def project_polyline(
@@ -677,6 +834,39 @@ def cgrcs_manifest() -> dict[str, object]:
         "face_codes": {str(idx): code for idx, code in enumerate(FACE_CODES)},
         "canonical_frames": [frame.code for frame in enumerate_reference_frames()],
         "iso_views": list(ISO_VIEWS),
+        "view_families": {
+            "corner_face": {
+                "description": "orientation-normalized corner-view rhombs; 24 corner/face exports collapse to 12 rotation classes",
+                "unique_count": len(UNIQUE_CORNER_FACE_PAIRS),
+                "canonical_pairs": [
+                    {"corner": corner, "face": face, "view": f"I{ISO_VIEWS[corner]}", "face_code": FACE_CODES[face]}
+                    for corner, face in UNIQUE_CORNER_FACE_PAIRS
+                ],
+                "equivalence_groups": [
+                    [
+                        {"corner": corner, "face": face}
+                        for corner, face in group
+                    ]
+                    for group in CORNER_FACE_GROUPS
+                ],
+            },
+            "edge": {
+                "description": "side views with a cube edge centered; two faces visible",
+                "unique_count": len(EDGE_VIEW_CODES),
+                "views": [
+                    {"code": code, "visible_faces": get_edge_view_visible_faces(code)}
+                    for code in EDGE_VIEW_CODES
+                ],
+            },
+            "face": {
+                "description": "head-on single-face views",
+                "unique_count": len(HEAD_ON_VIEW_CODES),
+                "views": [
+                    {"code": code, "visible_faces": get_head_on_visible_faces(code)}
+                    for code in HEAD_ON_VIEW_CODES
+                ],
+            },
+        },
         "polarity": {
             "Terra": "normal orientation",
             "Umbra": "canonical local mirror reserved as a polarity layer",
@@ -685,5 +875,7 @@ def cgrcs_manifest() -> dict[str, object]:
             "gnomonic lensing is preserved per frame; representation fairness "
             "comes from the complete canonical frame ensemble"
         ),
-        "canonical_rhomb_count": len(enumerate_rhomb_addresses(include_polarities=True)),
+        "canonical_corner_rhomb_count": len(enumerate_rhomb_addresses(include_polarities=True)),
+        "canonical_view_state_count": len(enumerate_view_states()),
+        "canonical_view_card_count": len(enumerate_view_addresses(include_polarities=True)),
     }

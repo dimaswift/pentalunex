@@ -15,8 +15,11 @@ pipeline work:
   existing browser/export offset behavior as a custom CGRCS frame.
 - `project_to_cube()` and `unproject_from_cube()` convert between geographic
   points and face-local `u,v` coordinates.
-- `enumerate_rhomb_addresses()` returns the full 864-state canonical rhomb
-  library: 18 frames x 8 iso views x 3 visible faces x 2 polarities.
+- `enumerate_rhomb_addresses()` returns the de-duplicated corner-rhomb library:
+  18 frames x 12 unique corner-face classes x 2 polarities = 432 cards.
+- `enumerate_view_addresses()` includes the expanded view library:
+  12 corner-face rhombs, 8 edge-centered side views, and 6 head-on face views
+  per frame and polarity = 936 cards.
 
 The gnomonic lensing is intentional. Individual frames are allowed to stretch or
 dramatize regions; representation fairness comes from the complete canonical
