@@ -15,12 +15,14 @@ const OVERLAP_EPS = 30;
 const state = {
   manifest: null,
   assets: {},
-  bondsByEdge: {},      // "face,edge" -> [{toFace, toEdge, type}]
+  assetOrder: [],
+  bondsByEdge: {},      // "assetId,edge" or legacy "face,edge" -> [{toAssetId, toFace, toEdge, type}]
   tileSvgInner: {},     // assetId -> array of cloned <Element>
   placed: [],           // {uid, assetId, mat, parity, occupiedEdges}
   uidCounter: 1,
   selectedUid: null,
   drag: null,
+  edgePreview: null,
   mirrorMode: false,    // toggled with spacebar
   view: { tx: 0, ty: 0, scale: 0.05 },
   pan: null,
@@ -52,6 +54,24 @@ function applyMat(m, p) {
 }
 function matToString(m) {
   return `matrix(${m.a},${m.b},${m.c},${m.d},${m.tx},${m.ty})`;
+}
+function composeMat(m2, m1) {
+  return {
+    a: m2.a * m1.a + m2.c * m1.b,
+    b: m2.b * m1.a + m2.d * m1.b,
+    c: m2.a * m1.c + m2.c * m1.d,
+    d: m2.b * m1.c + m2.d * m1.d,
+    tx: m2.a * m1.tx + m2.c * m1.ty + m2.tx,
+    ty: m2.b * m1.tx + m2.d * m1.ty + m2.ty,
+  };
+}
+function rotationAround(center, angleRad) {
+  const ct = Math.cos(angleRad), st = Math.sin(angleRad);
+  return {
+    a: ct, b: st, c: -st, d: ct,
+    tx: center[0] - (ct * center[0] - st * center[1]),
+    ty: center[1] - (st * center[0] + ct * center[1]),
+  };
 }
 
 // Build orientation-preserving rigid map (rotation + translation) sending P1->Q1 and P2->Q2.
@@ -125,26 +145,33 @@ async function loadManifest() {
   const res = await fetch(MANIFEST_URL);
   if (!res.ok) throw new Error(`Failed to load manifest: ${res.status}`);
   state.manifest = await res.json();
+  state.assetOrder = state.manifest.assets.map(asset => asset.id);
   for (const asset of state.manifest.assets) state.assets[asset.id] = asset;
 
-  for (const bond of state.manifest.topology.bonds.natural || []) {
-    const k = `${bond.from.face},${bond.from.edge}`;
-    (state.bondsByEdge[k] ||= []).push({
-      toFace: bond.to.face, toEdge: bond.to.edge, type: "natural",
-    });
-  }
-  for (const bond of state.manifest.topology.bonds.mirror || []) {
-    const k = `${bond.from.face},${bond.from.edge}`;
-    (state.bondsByEdge[k] ||= []).push({
-      toFace: bond.to.face, toEdge: bond.to.edge, type: "mirror",
-    });
-  }
+  addManifestBonds(state.manifest.topology.bonds.natural || [], "natural");
+  addManifestBonds(state.manifest.topology.bonds.mirror || [], "mirror");
   setStatus("");
+}
+
+function addManifestBonds(bonds, type) {
+  for (const bond of bonds) {
+    const k = bond.from.asset
+      ? `${bond.from.asset},${bond.from.edge}`
+      : `${bond.from.face},${bond.from.edge}`;
+    (state.bondsByEdge[k] ||= []).push({
+      toAssetId: bond.to.asset || null,
+      toFace: bond.to.face,
+      toEdge: bond.to.edge,
+      type: bond.type || type,
+    });
+  }
 }
 
 async function loadTileSvgInner(assetId) {
   if (state.tileSvgInner[assetId]) return state.tileSvgInner[assetId];
-  const res = await fetch(`${TILE_BASE}iso_${assetId}.svg`);
+  const asset = state.assets[assetId];
+  const svgPath = asset?.files?.svg || `iso_${assetId}.svg`;
+  const res = await fetch(`${TILE_BASE}${svgPath}`);
   if (!res.ok) throw new Error(`Failed to load tile ${assetId}`);
   const text = await res.text();
   const doc = new DOMParser().parseFromString(text, "image/svg+xml");
@@ -179,6 +206,21 @@ function assetEdgeCanvas(assetId, parity, mat, edgeName) {
   };
 }
 
+function edgeNames(asset) {
+  return asset.edge_order || Object.keys(asset.edges);
+}
+
+function assetSortIndex(assetId) {
+  const index = state.assetOrder.indexOf(assetId);
+  return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+}
+
+function bondsForAssetEdge(asset, edgeName) {
+  return state.bondsByEdge[`${asset.id},${edgeName}`]
+      || state.bondsByEdge[`${asset.face},${edgeName}`]
+      || [];
+}
+
 function placedPolygonCanvas(placed) {
   return assetPolygonCanvas(placed.assetId, placed.parity, placed.mat);
 }
@@ -193,13 +235,14 @@ function assetPolygonCanvas(assetId, parity, mat) {
   });
 }
 
-// Bonds permitted between (anchorFace,anchorEdge,anchorParity) and (candFace,candEdge,candParity).
+// Bonds permitted between (anchorAsset,anchorEdge,anchorParity) and (candAsset,candEdge,candParity).
 // Same parity → natural bonds; cross parity → mirror bonds (always intra-face/edge).
-function bondAllowed(anchorFace, anchorEdge, anchorParity, candFace, candEdge, candParity) {
+function bondAllowed(anchorAsset, anchorEdge, anchorParity, candAsset, candEdge, candParity) {
   const sameP = anchorParity === candParity;
-  const list = state.bondsByEdge[`${anchorFace},${anchorEdge}`] || [];
+  const list = bondsForAssetEdge(anchorAsset, anchorEdge);
   for (const b of list) {
-    if (b.toFace !== candFace || b.toEdge !== candEdge) continue;
+    if (b.toAssetId && b.toAssetId !== candAsset.id) continue;
+    if (b.toFace !== candAsset.face || b.toEdge !== candEdge) continue;
     if (sameP && b.type === "natural") return true;
     if (!sameP && b.type === "mirror") return true;
   }
@@ -213,7 +256,7 @@ function placementLegality(candAssetId, candParity, mat, excludeUid) {
   const candPoly = assetPolygonCanvas(candAssetId, candParity, mat);
 
   const candEdges = {};
-  for (const en of ["top", "right", "bottom", "left"]) {
+  for (const en of edgeNames(candAsset)) {
     candEdges[en] = assetEdgeCanvas(candAssetId, candParity, mat, en);
   }
 
@@ -226,16 +269,16 @@ function placementLegality(candAssetId, candParity, mat, excludeUid) {
       return { ok: false, reason: "overlap", uid: placed.uid };
     }
 
-    for (const cen of ["top", "right", "bottom", "left"]) {
+    for (const cen of edgeNames(candAsset)) {
       const ce = candEdges[cen];
-      for (const pen of ["top", "right", "bottom", "left"]) {
+      for (const pen of edgeNames(placedAsset)) {
         const pe = placedEdgeCanvas(placed, pen);
         if (!edgesCoincide(ce, pe)) continue;
         if (ce.edgeKey !== pe.edgeKey) {
           return { ok: false, reason: "edge-key-mismatch", uid: placed.uid };
         }
-        if (!bondAllowed(placedAsset.face, pen, placed.parity,
-                         candAsset.face, cen, candParity)) {
+        if (!bondAllowed(placedAsset, pen, placed.parity,
+                         candAsset, cen, candParity)) {
           return { ok: false, reason: "illegal-bond", uid: placed.uid };
         }
       }
@@ -259,14 +302,15 @@ function findSnap(candAssetId, canvasPt, opts = {}) {
     const placedParity = placed.parity || 1;
     const sameP = placedParity === candParity;
 
-    for (const edgeName of ["top", "right", "bottom", "left"]) {
+    for (const edgeName of edgeNames(placedAsset)) {
       if (placed.occupiedEdges.has(edgeName)) continue;
       const ae = placedEdgeCanvas(placed, edgeName);
       const midA = [(ae.from[0] + ae.to[0]) / 2, (ae.from[1] + ae.to[1]) / 2];
       const d = dist(canvasPt, midA);
 
-      const bondList = state.bondsByEdge[`${placedAsset.face},${edgeName}`] || [];
+      const bondList = bondsForAssetEdge(placedAsset, edgeName);
       for (const bond of bondList) {
+        if (bond.toAssetId && bond.toAssetId !== cand.id) continue;
         if (bond.toFace !== cand.face) continue;
         if (sameP && bond.type !== "natural") continue;
         if (!sameP && bond.type !== "mirror") continue;
@@ -334,6 +378,14 @@ function renderTileGroup(assetId, mat, parity, opts = {}) {
 
   const elements = state.tileSvgInner[assetId];
   if (elements) for (const el of elements) inner.appendChild(el.cloneNode(true));
+
+  const hit = document.createElementNS(SVG_NS, "polygon");
+  hit.setAttribute("class", "tile-hit-area");
+  hit.setAttribute("points", asset.polygon.map(v => v.point.join(",")).join(" "));
+  hit.setAttribute("fill", "transparent");
+  hit.setAttribute("stroke", "none");
+  inner.appendChild(hit);
+
   g.appendChild(inner);
 
   const outline = document.createElementNS(SVG_NS, "polygon");
@@ -386,6 +438,12 @@ function showAnchorEdge(snap) {
   overlayG.appendChild(line);
 }
 
+function clearEdgePreview() {
+  state.edgePreview = null;
+  clearGhost();
+  clearOverlay();
+}
+
 function updateMirrorIndicator() {
   if (!mirrorIndicator) return;
   mirrorIndicator.classList.toggle("active", state.mirrorMode);
@@ -415,11 +473,7 @@ function fitView() {
 function renderPalette() {
   while (palette.firstChild) palette.removeChild(palette.firstChild);
   const validIds = computeValidAssets();
-  const ids = Object.keys(state.assets).sort((a, b) => {
-    const va = validIds.has(a), vb = validIds.has(b);
-    if (va !== vb) return vb - va;
-    return a.localeCompare(b);
-  });
+  const ids = state.assetOrder.filter(id => state.assets[id]);
   for (const id of ids) palette.appendChild(makeTileCard(id, validIds.has(id)));
 }
 
@@ -457,22 +511,25 @@ function makeTileCard(assetId, valid) {
 function computeValidAssets() {
   const valid = new Set();
   if (state.placed.length === 0) return valid;
+  const targetAssets = new Set();
   const targetFaces = new Set();
   const candParity = state.mirrorMode ? -1 : 1;
   for (const p of state.placed) {
     const a = state.assets[p.assetId];
     const sameP = (p.parity || 1) === candParity;
-    for (const en of ["top", "right", "bottom", "left"]) {
+    for (const en of edgeNames(a)) {
       if (p.occupiedEdges.has(en)) continue;
-      const bonds = state.bondsByEdge[`${a.face},${en}`] || [];
+      const bonds = bondsForAssetEdge(a, en);
       for (const b of bonds) {
-        if (sameP && b.type === "natural") targetFaces.add(b.toFace);
-        else if (!sameP && b.type === "mirror") targetFaces.add(b.toFace);
+        if ((sameP && b.type === "natural") || (!sameP && b.type === "mirror")) {
+          if (b.toAssetId) targetAssets.add(b.toAssetId);
+          else targetFaces.add(b.toFace);
+        }
       }
     }
   }
   for (const id in state.assets) {
-    if (targetFaces.has(state.assets[id].face)) valid.add(id);
+    if (targetAssets.has(id) || targetFaces.has(state.assets[id].face)) valid.add(id);
   }
   return valid;
 }
@@ -481,6 +538,7 @@ function computeValidAssets() {
 function onPaletteMouseDown(e, assetId) {
   if (e.button !== 0) return;
   e.preventDefault();
+  clearEdgePreview();
   e.currentTarget.classList.add("dragging");
   beginDrag({
     assetId,
@@ -500,6 +558,7 @@ function onPlacedMouseDown(e) {
   if (!placed) return;
 
   state.selectedUid = uid;
+  clearEdgePreview();
   renderAllPlaced();
 
   beginDrag({
@@ -635,9 +694,11 @@ function recomputeOccupiedEdges() {
   for (const p of state.placed) p.occupiedEdges = new Set();
   for (let i = 0; i < state.placed.length; i++) {
     for (let j = i + 1; j < state.placed.length; j++) {
-      for (const en1 of ["top", "right", "bottom", "left"]) {
+      const a1 = state.assets[state.placed[i].assetId];
+      const a2 = state.assets[state.placed[j].assetId];
+      for (const en1 of edgeNames(a1)) {
         const e1 = placedEdgeCanvas(state.placed[i], en1);
-        for (const en2 of ["top", "right", "bottom", "left"]) {
+        for (const en2 of edgeNames(a2)) {
           const e2 = placedEdgeCanvas(state.placed[j], en2);
           if (edgesCoincide(e1, e2)) {
             state.placed[i].occupiedEdges.add(en1);
@@ -652,6 +713,169 @@ function recomputeOccupiedEdges() {
 function removePlaced(uid) {
   state.placed = state.placed.filter(p => p.uid !== uid);
   if (state.selectedUid === uid) state.selectedUid = null;
+  clearEdgePreview();
+  recomputeOccupiedEdges();
+  renderAllPlaced();
+  renderPalette();
+}
+
+function connectionCandidates(anchor, edgeName) {
+  const anchorAsset = state.assets[anchor.assetId];
+  if (!anchorAsset || anchor.occupiedEdges.has(edgeName)) return [];
+  const anchorParity = anchor.parity || 1;
+  const candParity = state.mirrorMode ? -1 : 1;
+  const sameP = anchorParity === candParity;
+  const ae = placedEdgeCanvas(anchor, edgeName);
+  const candidates = [];
+
+  for (const bond of bondsForAssetEdge(anchorAsset, edgeName)) {
+    if (sameP && bond.type !== "natural") continue;
+    if (!sameP && bond.type !== "mirror") continue;
+    const ids = bond.toAssetId
+      ? [bond.toAssetId]
+      : state.assetOrder.filter(id => state.assets[id].face === bond.toFace);
+    for (const assetId of ids) {
+      const cand = state.assets[assetId];
+      if (!cand || cand.face !== bond.toFace || !cand.edges[bond.toEdge]) continue;
+      const ce = cand.edges[bond.toEdge];
+      if (ce.edgeKey !== ae.edgeKey) continue;
+      const candLocal = localMatForParity(cand, candParity);
+      let C1 = ce.image.from, C2 = ce.image.to;
+      if (candLocal) {
+        C1 = applyMat(candLocal, C1);
+        C2 = applyMat(candLocal, C2);
+      }
+      const mat = sameP
+        ? rigidTransform(C1, C2, ae.to, ae.from)
+        : rigidTransform(C1, C2, ae.from, ae.to);
+      const legality = placementLegality(assetId, candParity, mat, null);
+      if (!legality.ok) continue;
+      candidates.push({
+        assetId,
+        mat,
+        parity: candParity,
+        anchorUid: anchor.uid,
+        anchorEdge: edgeName,
+        candEdge: bond.toEdge,
+        bondType: bond.type,
+      });
+    }
+  }
+
+  candidates.sort((a, b) => assetSortIndex(a.assetId) - assetSortIndex(b.assetId));
+  return candidates;
+}
+
+function cycleEdgeConnection(edgeIndex) {
+  const anchor = state.placed.find(p => p.uid === state.selectedUid);
+  if (!anchor) return;
+  const asset = state.assets[anchor.assetId];
+  const edgeName = edgeNames(asset)[edgeIndex];
+  if (!edgeName) return;
+  if (anchor.occupiedEdges.has(edgeName)) {
+    clearEdgePreview();
+    setStatus(`Edge ${edgeIndex + 1} is occupied.`);
+    setTimeout(() => setStatus(""), 1200);
+    return;
+  }
+
+  const samePreview = state.edgePreview
+    && state.edgePreview.anchorUid === anchor.uid
+    && state.edgePreview.edgeName === edgeName
+    && state.edgePreview.parity === (state.mirrorMode ? -1 : 1);
+  const candidates = samePreview
+    ? state.edgePreview.candidates
+    : connectionCandidates(anchor, edgeName);
+  if (candidates.length === 0) {
+    clearEdgePreview();
+    setStatus(`No legal connections for edge ${edgeIndex + 1}.`);
+    setTimeout(() => setStatus(""), 1200);
+    return;
+  }
+
+  const index = samePreview ? (state.edgePreview.index + 1) % candidates.length : 0;
+  const preview = candidates[index];
+  state.edgePreview = {
+    anchorUid: anchor.uid,
+    edgeName,
+    parity: preview.parity,
+    candidates,
+    index,
+  };
+  showGhost(preview.assetId, preview.mat, preview.parity, true);
+  showAnchorEdge(preview);
+  setStatus(`Edge ${edgeIndex + 1}: ${index + 1}/${candidates.length} ${preview.assetId} · Enter to place`);
+}
+
+function commitEdgePreview() {
+  if (!state.edgePreview) return;
+  const preview = state.edgePreview.candidates[state.edgePreview.index];
+  if (!preview) return;
+  const final = placementLegality(preview.assetId, preview.parity, preview.mat, null);
+  if (!final.ok) {
+    clearEdgePreview();
+    recomputeOccupiedEdges();
+    renderAllPlaced();
+    renderPalette();
+    return;
+  }
+  const uid = state.uidCounter++;
+  state.placed.push({
+    uid,
+    assetId: preview.assetId,
+    mat: preview.mat,
+    parity: preview.parity,
+    occupiedEdges: new Set(),
+  });
+  clearEdgePreview();
+  recomputeOccupiedEdges();
+  state.selectedUid = uid;
+  renderAllPlaced();
+  renderPalette();
+}
+
+function connectedComponent(rootUid) {
+  const byUid = new Map(state.placed.map(p => [p.uid, p]));
+  const seen = new Set([rootUid]);
+  const queue = [rootUid];
+  while (queue.length) {
+    const uid = queue.shift();
+    const placed = byUid.get(uid);
+    if (!placed) continue;
+    const placedAsset = state.assets[placed.assetId];
+    for (const other of state.placed) {
+      if (seen.has(other.uid)) continue;
+      const otherAsset = state.assets[other.assetId];
+      let connected = false;
+      for (const e1 of edgeNames(placedAsset)) {
+        const pe = placedEdgeCanvas(placed, e1);
+        for (const e2 of edgeNames(otherAsset)) {
+          if (edgesCoincide(pe, placedEdgeCanvas(other, e2))) {
+            connected = true;
+            break;
+          }
+        }
+        if (connected) break;
+      }
+      if (connected) {
+        seen.add(other.uid);
+        queue.push(other.uid);
+      }
+    }
+  }
+  return seen;
+}
+
+function rotateSelected(deltaDeg) {
+  const selected = state.placed.find(p => p.uid === state.selectedUid);
+  if (!selected) return;
+  clearEdgePreview();
+  const component = connectedComponent(selected.uid);
+  const center = polygonCenter(placedPolygonCanvas(selected).map(point => ({ point })));
+  const rot = rotationAround(center, deltaDeg * Math.PI / 180);
+  for (const placed of state.placed) {
+    if (component.has(placed.uid)) placed.mat = composeMat(rot, placed.mat);
+  }
   recomputeOccupiedEdges();
   renderAllPlaced();
   renderPalette();
@@ -674,6 +898,7 @@ stage.addEventListener("mousedown", (e) => {
                       (e.button === 0 && e.target === canvas && e.shiftKey);
   if (e.button === 0 && e.target === canvas && state.selectedUid != null && !e.shiftKey) {
     state.selectedUid = null;
+    clearEdgePreview();
     renderAllPlaced();
   }
   if (isPanButton) {
@@ -708,6 +933,18 @@ document.addEventListener("keydown", (e) => {
   if ((e.key === "Backspace" || e.key === "Delete") && state.selectedUid != null) {
     e.preventDefault();
     removePlaced(state.selectedUid);
+  } else if (["1", "2", "3"].includes(e.key) && state.selectedUid != null && !state.drag) {
+    e.preventDefault();
+    cycleEdgeConnection(parseInt(e.key, 10) - 1);
+  } else if (e.key === "Enter" && state.edgePreview) {
+    e.preventDefault();
+    commitEdgePreview();
+  } else if ((e.key === "e" || e.key === "E") && state.selectedUid != null && !state.drag) {
+    e.preventDefault();
+    rotateSelected(15);
+  } else if ((e.key === "q" || e.key === "Q") && state.selectedUid != null && !state.drag) {
+    e.preventDefault();
+    rotateSelected(-15);
   } else if (e.key === " " || e.code === "Space") {
     e.preventDefault();
     state.mirrorMode = !state.mirrorMode;
@@ -716,6 +953,7 @@ document.addEventListener("keydown", (e) => {
       state.drag.parity = state.mirrorMode ? -1 : 1;
       refreshDragGhost();
     } else {
+      clearEdgePreview();
       renderPalette();
     }
   } else if (e.key === "Escape") {
@@ -730,6 +968,8 @@ document.addEventListener("keydown", (e) => {
         const g = placedG.querySelector(`[data-uid="${drag.excludeUid}"]`);
         if (g) g.classList.remove("dragging");
       }
+    } else if (state.edgePreview) {
+      clearEdgePreview();
     }
   }
 });
