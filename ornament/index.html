@@ -35,6 +35,16 @@
   }
   button:hover { background: #25253b; border-color: #7af; color: #fff; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .number-input {
+    width: 58px;
+    background: #0a0a14;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 5px 6px;
+    font-family: monospace;
+    font-size: 12px;
+  }
 
   .kbd {
     display: inline-block;
@@ -193,12 +203,14 @@
 <div id="toolbar">
   <h1>Ornament Builder</h1>
   <button id="btn-new">New</button>
+  <button id="btn-autogrow">Auto Grow</button>
+  <input id="autogrow-count" class="number-input" type="number" min="1" max="500" value="96" title="Target tile count">
   <button id="btn-export">Export SVG</button>
   <button id="btn-save">Save Set</button>
   <button id="btn-load">Load Set</button>
   <span class="spacer"></span>
   <span id="mirror-indicator" class="mirror-indicator" title="Toggle mirror mode (Space)">Mirror</span>
-  <span class="hint">scroll zoom · shift+drag pan · <span class="kbd">Space</span> mirror · <span class="kbd">Del</span> remove</span>
+  <span class="hint">scroll zoom · shift+drag pan · <span class="kbd">G</span> grow · <span class="kbd">Space</span> mirror · <span class="kbd">Del</span> remove</span>
 </div>
 
 <div id="workspace">

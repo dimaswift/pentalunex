@@ -6,6 +6,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const MANIFEST_URL = "./export/vector_tiles/manifest.json";
 const TILE_BASE = "./export/vector_tiles/";
 const STORAGE_KEY = "ornament_builder_sets_v1";
+const AUTO_GROW_STEP_BUDGET = 12000;
 
 // Tolerances (in image-pixel units; tile edges ≈ 1858 px)
 const EDGE_COINCIDE_EPS = 50;
@@ -23,6 +24,7 @@ const state = {
   selectedUid: null,
   drag: null,
   edgePreview: null,
+  autoGrowRunning: false,
   mirrorMode: false,    // toggled with spacebar
   view: { tx: 0, ty: 0, scale: 0.05 },
   pan: null,
@@ -88,6 +90,19 @@ function rigidTransform(P1, P2, Q1, Q2) {
 function dist(p, q) {
   const dx = p[0] - q[0], dy = p[1] - q[1];
   return Math.hypot(dx, dy);
+}
+
+function randomItem(items) {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function shuffled(items) {
+  const out = items.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
 }
 
 function polygonCenter(polygon) {
@@ -719,11 +734,11 @@ function removePlaced(uid) {
   renderPalette();
 }
 
-function connectionCandidates(anchor, edgeName) {
+function connectionCandidates(anchor, edgeName, opts = {}) {
   const anchorAsset = state.assets[anchor.assetId];
   if (!anchorAsset || anchor.occupiedEdges.has(edgeName)) return [];
   const anchorParity = anchor.parity || 1;
-  const candParity = state.mirrorMode ? -1 : 1;
+  const candParity = opts.parity ?? (state.mirrorMode ? -1 : 1);
   const sameP = anchorParity === candParity;
   const ae = placedEdgeCanvas(anchor, edgeName);
   const candidates = [];
@@ -764,6 +779,13 @@ function connectionCandidates(anchor, edgeName) {
 
   candidates.sort((a, b) => assetSortIndex(a.assetId) - assetSortIndex(b.assetId));
   return candidates;
+}
+
+function allConnectionCandidates(anchor, edgeName) {
+  return shuffled([
+    ...connectionCandidates(anchor, edgeName, { parity: 1 }),
+    ...connectionCandidates(anchor, edgeName, { parity: -1 }),
+  ]);
 }
 
 function cycleEdgeConnection(edgeIndex) {
@@ -881,6 +903,125 @@ function rotateSelected(deltaDeg) {
   renderPalette();
 }
 
+function clonePlaced(placed = state.placed) {
+  return placed.map(p => ({
+    uid: p.uid,
+    assetId: p.assetId,
+    mat: { ...p.mat },
+    parity: p.parity,
+    occupiedEdges: new Set(p.occupiedEdges ? [...p.occupiedEdges] : []),
+  }));
+}
+
+function restorePlaced(snapshot) {
+  state.placed = clonePlaced(snapshot);
+  recomputeOccupiedEdges();
+}
+
+function openFrontierEdges() {
+  const edges = [];
+  for (const placed of state.placed) {
+    const asset = state.assets[placed.assetId];
+    for (const edgeName of edgeNames(asset)) {
+      if (!placed.occupiedEdges.has(edgeName)) edges.push({ placed, edgeName });
+    }
+  }
+  return edges;
+}
+
+function ensureAutoGrowSeed() {
+  if (state.placed.length > 0) return;
+  const assetId = randomItem(state.assetOrder);
+  const parity = Math.random() < 0.5 ? 1 : -1;
+  const rect = canvas.getBoundingClientRect();
+  const center = clientToCanvas(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  const uid = state.uidCounter++;
+  state.placed.push({
+    uid,
+    assetId,
+    mat: freePlacement(assetId, parity, center),
+    parity,
+    occupiedEdges: new Set(),
+  });
+  state.selectedUid = uid;
+  recomputeOccupiedEdges();
+}
+
+function autoGrow(targetCount) {
+  if (state.autoGrowRunning) return;
+  state.autoGrowRunning = true;
+  const growButton = document.getElementById("btn-autogrow");
+  if (growButton) growButton.disabled = true;
+  clearEdgePreview();
+  ensureAutoGrowSeed();
+
+  const seedSnapshot = clonePlaced();
+  let bestSnapshot = clonePlaced();
+  let bestCount = state.placed.length;
+  const stats = { steps: 0, backtracks: 0 };
+
+  function rememberBest() {
+    if (state.placed.length > bestCount) {
+      bestCount = state.placed.length;
+      bestSnapshot = clonePlaced();
+    }
+  }
+
+  function search() {
+    rememberBest();
+    if (state.placed.length >= targetCount) return true;
+    if (stats.steps++ >= AUTO_GROW_STEP_BUDGET) return false;
+
+    const frontiers = shuffled(openFrontierEdges());
+    for (const frontier of frontiers) {
+      const candidates = allConnectionCandidates(frontier.placed, frontier.edgeName);
+      if (candidates.length === 0) continue;
+
+      for (const cand of candidates) {
+        const uid = state.uidCounter++;
+        state.placed.push({
+          uid,
+          assetId: cand.assetId,
+          mat: cand.mat,
+          parity: cand.parity,
+          occupiedEdges: new Set(),
+        });
+        recomputeOccupiedEdges();
+
+        if (search()) return true;
+
+        state.placed.pop();
+        stats.backtracks++;
+        recomputeOccupiedEdges();
+      }
+    }
+    return false;
+  }
+
+  const solved = search();
+  restorePlaced(solved ? clonePlaced() : bestSnapshot);
+  if (state.placed.length === seedSnapshot.length && bestCount === seedSnapshot.length) {
+    restorePlaced(seedSnapshot);
+  }
+  state.selectedUid = state.placed[state.placed.length - 1]?.uid ?? null;
+  renderAllPlaced();
+  renderPalette();
+  setStatus(
+    `${solved ? "Auto grow complete" : "Auto grow kept best branch"}: ${state.placed.length}/${targetCount} tiles · ${stats.backtracks} backtracks`
+  );
+  setTimeout(() => setStatus(""), 5000);
+  if (growButton) growButton.disabled = false;
+  state.autoGrowRunning = false;
+}
+
+function runAutoGrowFromControls() {
+  const input = document.getElementById("autogrow-count");
+  const requested = parseInt(input?.value || "96", 10);
+  const targetCount = Math.max(state.placed.length + 1, Math.min(500, requested || 96));
+  setStatus(`Auto grow searching for ${targetCount} tiles...`);
+  setTimeout(() => autoGrow(targetCount), 0);
+}
+
 // ---- Stage interactions ----
 stage.addEventListener("wheel", (e) => {
   e.preventDefault();
@@ -945,6 +1086,9 @@ document.addEventListener("keydown", (e) => {
   } else if ((e.key === "q" || e.key === "Q") && state.selectedUid != null && !state.drag) {
     e.preventDefault();
     rotateSelected(-15);
+  } else if ((e.key === "g" || e.key === "G") && !state.drag) {
+    e.preventDefault();
+    runAutoGrowFromControls();
   } else if (e.key === " " || e.code === "Space") {
     e.preventDefault();
     state.mirrorMode = !state.mirrorMode;
@@ -985,9 +1129,12 @@ document.getElementById("btn-new").addEventListener("click", () => {
   if (state.placed.length > 0 && !confirm("Clear the board?")) return;
   state.placed = [];
   state.selectedUid = null;
+  clearEdgePreview();
   renderAllPlaced();
   renderPalette();
 });
+
+document.getElementById("btn-autogrow").addEventListener("click", runAutoGrowFromControls);
 
 document.getElementById("btn-export").addEventListener("click", exportSvg);
 
