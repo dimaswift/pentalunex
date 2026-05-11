@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sphere Cube Studio</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail rail-left" aria-label="Projection controls">
+      <header class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <h1>Sphere Cube Studio</h1>
+          <p>projection atlas</p>
+        </div>
+      </header>
+
+      <section class="panel">
+        <h2>Coordinate</h2>
+        <label class="field">
+          <span>Longitude</span>
+          <output id="lonValue">0.00</output>
+          <input id="lonInput" type="range" min="-180" max="180" step="0.01" value="0">
+        </label>
+        <label class="field">
+          <span>Latitude</span>
+          <output id="latValue">0.00</output>
+          <input id="latInput" type="range" min="-90" max="90" step="0.01" value="0">
+        </label>
+        <label class="field">
+          <span>Subdivision depth</span>
+          <output id="depthValue">2</output>
+          <input id="depthInput" type="range" min="0" max="6" step="1" value="2">
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>Projection Anchor</h2>
+        <label class="field">
+          <span>Longitude offset</span>
+          <output id="anchorLonValue">0</output>
+          <input id="anchorLonInput" type="range" min="-180" max="180" step="15" value="0">
+        </label>
+        <label class="field">
+          <span>Latitude offset</span>
+          <output id="anchorLatValue">0</output>
+          <input id="anchorLatInput" type="range" min="-90" max="90" step="15" value="0">
+        </label>
+        <label class="field">
+          <span>Roll offset</span>
+          <output id="anchorRollValue">0</output>
+          <input id="anchorRollInput" type="range" min="-180" max="180" step="15" value="0">
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>Atlas</h2>
+        <label class="field">
+          <span>Graticule step</span>
+          <output id="graticuleValue">15</output>
+          <input id="graticuleInput" type="range" min="5" max="45" step="5" value="15">
+        </label>
+        <label class="field">
+          <span>Line sampling</span>
+          <output id="samplingValue">1.0</output>
+          <input id="samplingInput" type="range" min="0.25" max="3" step="0.25" value="1">
+        </label>
+        <label class="check-row">
+          <input id="subdivisionInput" type="checkbox" checked>
+          <span>triangle grid</span>
+        </label>
+        <label class="check-row">
+          <input id="labelsInput" type="checkbox" checked>
+          <span>face labels</span>
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>Map Style</h2>
+        <label class="color-row">
+          <span>Ocean</span>
+          <input id="oceanColorInput" type="color" value="#102725">
+        </label>
+        <label class="color-row">
+          <span>Land</span>
+          <input id="landColorInput" type="color" value="#b9b39f">
+        </label>
+        <label class="color-row">
+          <span>Border</span>
+          <input id="coastColorInput" type="color" value="#f0dcc0">
+        </label>
+        <label class="field">
+          <span>Border thickness</span>
+          <output id="coastWidthValue">0.70</output>
+          <input id="coastWidthInput" type="range" min="0" max="3" step="0.05" value="0.7">
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>Export</h2>
+        <label class="select-field">
+          <span>Type</span>
+          <select id="exportTypeInput">
+            <option value="svg" selected>SVG</option>
+            <option value="png">PNG</option>
+          </select>
+        </label>
+        <label class="field export-svg-control">
+          <span>SVG scale</span>
+          <output id="svgScaleValue">512</output>
+          <input id="svgScaleInput" type="range" min="128" max="4096" step="64" value="512">
+        </label>
+        <label class="field export-png-control hidden">
+          <span>PNG resolution</span>
+          <output id="pngResolutionValue">1024</output>
+          <input id="pngResolutionInput" type="range" min="128" max="4096" step="64" value="1024">
+        </label>
+        <label class="check-row">
+          <input id="mirrorInput" type="checkbox">
+          <span>mirror</span>
+        </label>
+        <label class="check-row">
+          <input id="exportBorderInput" type="checkbox" checked>
+          <span>include border</span>
+        </label>
+        <label class="check-row">
+          <input id="exportGraticuleInput" type="checkbox">
+          <span>graticule layer</span>
+        </label>
+        <label class="color-row export-graticule-control hidden">
+          <span>Graticule color</span>
+          <input id="exportGraticuleColorInput" type="color" value="#37c8b1">
+        </label>
+        <label class="field export-graticule-control hidden">
+          <span>Graticule thickness</span>
+          <output id="exportGraticuleWidthValue">0.60</output>
+          <input id="exportGraticuleWidthInput" type="range" min="0.1" max="5" step="0.1" value="0.6">
+        </label>
+        <button id="exportSelectedButton" type="button">Export selected</button>
+        <button id="exportAllButton" type="button">Export all</button>
+        <progress id="exportProgress" class="export-progress hidden" max="1" value="0"></progress>
+        <button id="copyAddressButton" type="button">Copy address JSON</button>
+        <button id="downloadManifestButton" type="button">Download topology JSON</button>
+      </section>
+    </aside>
+
+    <main class="stage">
+      <nav class="stage-tabs" aria-label="Workspace tabs">
+        <button id="atlasTabButton" class="stage-tab active" type="button">Atlas</button>
+        <button id="constructorTabButton" class="stage-tab" type="button">Constructor</button>
+      </nav>
+      <section id="atlasView" class="workspace-view active" aria-label="Atlas workspace">
+        <canvas id="atlasCanvas" aria-label="Twelve isometric sphere-cube rhombs"></canvas>
+      </section>
+      <section id="constructorView" class="workspace-view" aria-label="Constructor workspace">
+        <canvas id="constructorCanvas" aria-label="Triangular tile constructor"></canvas>
+        <div class="constructor-hint">Click highlighted cells to paint. Drag empty space to pan. Wheel zooms. Shift-click deletes.</div>
+      </section>
+      <div class="status-strip" id="statusStrip">ready</div>
+    </main>
+
+    <aside class="rail rail-right" aria-label="Coordinate inspector">
+      <section class="panel canvas-panel atlas-side-panel">
+        <h2>Globe</h2>
+        <canvas id="globeCanvas" aria-label="Rotatable orthographic globe"></canvas>
+      </section>
+
+      <section class="panel canvas-panel atlas-side-panel">
+        <h2>Triangle Preview</h2>
+        <canvas id="triangleCanvas" aria-label="Selected triangle map preview"></canvas>
+      </section>
+
+      <section class="panel inspector atlas-side-panel">
+        <h2>Probe</h2>
+        <dl id="probeList"></dl>
+      </section>
+
+      <section class="panel inspector atlas-side-panel">
+        <h2>Selected Address</h2>
+        <dl id="addressList"></dl>
+      </section>
+
+      <section class="panel inspector atlas-side-panel">
+        <h2>Face Edges</h2>
+        <dl id="adjacencyList"></dl>
+      </section>
+
+      <section id="constructorPanel" class="panel inspector hidden">
+        <h2>Constructor</h2>
+        <label class="select-field">
+          <span>Seed key</span>
+          <input id="constructorSeedInput" type="text" value="">
+        </label>
+        <p class="mode-pill">Mode <strong id="constructorModeValue">regular</strong></p>
+        <dl id="constructorSelectionList"></dl>
+        <button id="addTileButton" type="button">Place seed</button>
+        <button id="clearConstructorButton" type="button">Clear set</button>
+        <button id="exportConstructedButton" type="button">Export tile set</button>
+        <button id="exportTileJsonButton" type="button">Export tile JSON</button>
+        <button id="loadTileJsonButton" type="button">Load tile JSON</button>
+        <input id="tileJsonInput" class="hidden" type="file" accept="application/json,.json">
+      </section>
+
+      <section id="constructorTreePanel" class="panel constructor-tree-panel hidden">
+        <h2>Grid Painter</h2>
+        <div id="constructorHelp" class="constructor-help"></div>
+      </section>
+    </aside>
+  </div>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

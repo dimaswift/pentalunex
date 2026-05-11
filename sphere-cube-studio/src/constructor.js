@@ -1,0 +1,950 @@
+import {
+  FACE_NAMES,
+  addressKey,
+  childTriangleVertices,
+  isoProjectFaceUV,
+  neighborTriangleAddress,
+  packPath,
+  rootTriangleName,
+  rootTriangleVertices,
+  triangleVerticesFromAddress,
+  uvToTriAddress,
+} from "./spherecube.js";
+import { renderTriangleSvgFragment } from "./exporter.js";
+import { drawLandOnTriangle } from "./map-render.js";
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const EDGE_KEYS = ["1", "2", "3"];
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 4;
+
+export function createTileConstructor(config) {
+  const state = {
+    pieces: [],
+    selectedPieceId: null,
+    seedAddress: null,
+    seedKey: "",
+    mirrorMode: false,
+    depth: 0,
+    orientation: null,
+    style: null,
+    polygons: null,
+    mapCache: new Map(),
+    cacheSignature: "",
+    active: false,
+    nextId: 1,
+    gridSide: 80,
+    unitScale: 320,
+    view: { x: 0, y: 0, scale: 1 },
+    pan: null,
+    size: { width: 1, height: 1, ratio: 1 },
+  };
+
+  config.canvas.addEventListener("pointerdown", handlePointerDown);
+  config.canvas.addEventListener("pointermove", handlePointerMove);
+  config.canvas.addEventListener("pointerup", handlePointerUp);
+  config.canvas.addEventListener("pointercancel", handlePointerUp);
+  config.canvas.addEventListener("wheel", handleWheel, { passive: false });
+  config.seedInput.addEventListener("input", () => {
+    state.seedKey = config.seedInput.value.trim();
+    updateSelectionList();
+  });
+
+  return {
+    sync,
+    setActive,
+    resize,
+    render,
+    placeSeed,
+    clear,
+    exportJson,
+    loadJson,
+    exportTileSet,
+    handleKey,
+  };
+
+  function sync(next) {
+    state.depth = next.depth;
+    state.orientation = next.orientation;
+    state.style = next.style;
+    state.polygons = next.polygons;
+    state.gridSide = gridSideForDepth(state.depth);
+    state.unitScale = state.gridSide * (2 ** state.depth);
+    const cacheSignature = [
+      state.polygons?.length ?? 0,
+      state.style?.ocean,
+      state.style?.land,
+      state.style?.coast,
+      state.style?.coastWidth,
+      state.orientation?.lon,
+      state.orientation?.lat,
+      state.orientation?.roll,
+      state.gridSide,
+    ].join(":");
+    if (cacheSignature !== state.cacheSignature) {
+      state.cacheSignature = cacheSignature;
+      state.mapCache.clear();
+    }
+
+    if (next.seedAddress && state.pieces.length === 0) {
+      state.seedAddress = cloneAddress(next.seedAddress);
+      state.seedKey = addressVariantKey(state.seedAddress);
+      config.seedInput.value = state.seedKey;
+    }
+
+    renderHelp();
+    updateSelectionList();
+    render();
+  }
+
+  function setActive(active) {
+    state.active = active;
+    render();
+  }
+
+  function resize() {
+    measureCanvas();
+    render();
+  }
+
+  function measureCanvas() {
+    const rect = config.canvas.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    state.size = {
+      width: Math.max(1, rect.width),
+      height: Math.max(1, rect.height),
+      ratio,
+    };
+    config.canvas.width = Math.floor(state.size.width * ratio);
+    config.canvas.height = Math.floor(state.size.height * ratio);
+  }
+
+  function render() {
+    const ctx = config.canvas.getContext("2d");
+    const { width, height, ratio } = state.size;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    drawBackground(ctx, width, height);
+
+    ctx.save();
+    ctx.translate(state.view.x, state.view.y);
+    ctx.scale(state.view.scale, state.view.scale);
+    drawTriangularGrid(ctx, visibleWorldBounds());
+    const candidates = buildCandidates();
+    for (const candidate of candidates) drawCandidate(ctx, candidate);
+    for (const piece of state.pieces) drawPiece(ctx, piece);
+    const selected = selectedPiece();
+    if (selected) drawEdgeLabels(ctx, selected);
+    ctx.restore();
+
+    if (!state.pieces.length) {
+      drawEmptyState(ctx, width, height);
+    }
+  }
+
+  function renderHelp() {
+    config.help.replaceChildren();
+    const rows = [
+      ["Grid", `depth ${state.depth}, cell ${Math.round(state.gridSide)}px`],
+      ["Seed", "uses the selected atlas triangle by default"],
+      ["Click", "empty legal cell paints a tile"],
+      ["Shift click", "deletes an existing tile"],
+      ["Wheel", "zooms toward the cursor"],
+      ["Drag", "pans from empty canvas space"],
+      ["Space", "toggles regular/mirror paint mode"],
+      ["1 2 3", "paint from selected edge"],
+    ];
+    for (const [label, value] of rows) {
+      const item = document.createElement("div");
+      const strong = document.createElement("strong");
+      const span = document.createElement("span");
+      strong.textContent = label;
+      span.textContent = value;
+      item.append(strong, span);
+      config.help.append(item);
+    }
+  }
+
+  function placeSeed() {
+    measureCanvas();
+    let address;
+    try {
+      address = parseSeedKey(state.seedKey || config.seedInput.value.trim());
+    } catch (error) {
+      config.setStatus(error.message);
+      return;
+    }
+    state.pieces = [];
+    state.nextId = 1;
+    const piece = createPiece(address, state.mirrorMode, 0, 0, 0);
+    const center = screenToWorldPoint({ x: state.size.width * 0.5, y: state.size.height * 0.5 });
+    centerPiece(piece, center.x, center.y);
+    state.pieces.push(piece);
+    state.selectedPieceId = piece.id;
+    updateSelectionList();
+    render();
+    config.setStatus(`seeded ${pieceLabel(piece)}`);
+  }
+
+  function clear() {
+    state.pieces = [];
+    state.selectedPieceId = null;
+    state.nextId = 1;
+    updateSelectionList();
+    render();
+    config.setStatus("constructor cleared");
+  }
+
+  function handleKey(event) {
+    if (!state.active) return false;
+    if (event.key === " ") {
+      state.mirrorMode = !state.mirrorMode;
+      updateSelectionList();
+      render();
+      config.setStatus(`paint mode ${state.mirrorMode ? "mirror" : "regular"}`);
+      event.preventDefault();
+      return true;
+    }
+    const edge = EDGE_KEYS.indexOf(event.key);
+    if (edge < 0) return false;
+    const selected = selectedPiece();
+    if (!selected) return false;
+    const candidate = candidateForEdge(selected, edge);
+    if (candidate) placeCandidate(candidate);
+    event.preventDefault();
+    return true;
+  }
+
+  function handlePointerDown(event) {
+    if (event.button !== 0) return;
+    const screen = canvasPoint(event);
+    const point = screenToWorldPoint(screen);
+    const piece = pickPiece(point.x, point.y);
+    if (piece) {
+      if (event.shiftKey) {
+        deletePiece(piece);
+        return;
+      }
+      state.selectedPieceId = piece.id;
+      updateSelectionList();
+      render();
+      return;
+    }
+
+    const candidate = pickCandidate(point.x, point.y);
+    if (!candidate) {
+      state.pan = {
+        id: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        viewX: state.view.x,
+        viewY: state.view.y,
+      };
+      config.canvas.setPointerCapture(event.pointerId);
+      return;
+    }
+    placeCandidate(candidate);
+  }
+
+  function handlePointerMove(event) {
+    if (!state.pan || state.pan.id !== event.pointerId) return;
+    state.view.x = state.pan.viewX + event.clientX - state.pan.x;
+    state.view.y = state.pan.viewY + event.clientY - state.pan.y;
+    render();
+  }
+
+  function handlePointerUp(event) {
+    if (state.pan?.id !== event.pointerId) return;
+    state.pan = null;
+    try {
+      config.canvas.releasePointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may already be gone after tab switches or canceled drags.
+    }
+  }
+
+  function handleWheel(event) {
+    event.preventDefault();
+    const screen = canvasPoint(event);
+    const world = screenToWorldPoint(screen);
+    const nextScale = clamp(state.view.scale * Math.exp(-event.deltaY * 0.0012), MIN_ZOOM, MAX_ZOOM);
+    state.view.scale = nextScale;
+    state.view.x = screen.x - world.x * nextScale;
+    state.view.y = screen.y - world.y * nextScale;
+    updateSelectionList();
+    render();
+  }
+
+  function placeCandidate(candidate) {
+    const existing = findPieceAtCell(candidate.piece);
+    if (existing) {
+      state.selectedPieceId = existing.id;
+      updateSelectionList();
+      render();
+      config.setStatus(`selected existing ${pieceLabel(existing)}`);
+      return;
+    }
+    const piece = {
+      ...candidate.piece,
+      id: `p${state.nextId++}`,
+    };
+    state.pieces.push(piece);
+    state.selectedPieceId = piece.id;
+    updateSelectionList();
+    render();
+    config.setStatus(`painted ${pieceLabel(piece)} from edge ${candidate.edge + 1}`);
+  }
+
+  function deletePiece(piece) {
+    state.pieces = state.pieces.filter((item) => item.id !== piece.id);
+    if (state.selectedPieceId === piece.id) state.selectedPieceId = state.pieces[0]?.id ?? null;
+    updateSelectionList();
+    render();
+    config.setStatus(`deleted ${pieceLabel(piece)}`);
+  }
+
+  function buildCandidates() {
+    const candidates = [];
+    if (!state.pieces.length) return candidates;
+    for (const piece of state.pieces) {
+      for (let edge = 0; edge < 3; edge += 1) {
+        const candidate = candidateForEdge(piece, edge);
+        if (!candidate) continue;
+        if (findPieceAtCell(candidate.piece)) continue;
+        if (candidates.some((item) => sameCandidate(item.piece, candidate.piece))) continue;
+        candidates.push(candidate);
+      }
+    }
+    return candidates;
+  }
+
+  function candidateForEdge(basePiece, edge) {
+    if (state.mirrorMode) {
+      const address = cloneAddress(basePiece.address);
+      const piece = createPiece(address, !basePiece.mirrored, 0, 0, 0, "candidate", basePiece.variant);
+      alignAcrossEdge(piece, edge, transformedEdge(basePiece, edge), transformedTriangle(basePiece)[edge]);
+      return { piece, source: basePiece, edge, alignEdge: edge, mirrorMode: true };
+    }
+
+    const neighbor = neighborTriangleAddress(basePiece.address, edge, basePiece.address.depth, state.orientation);
+    const variants = neighbor.face === basePiece.address.face ? [basePiece.variant] : [0, 1];
+    const candidates = variants.map((variant) => {
+      const address = { ...neighbor, variant };
+      const alignEdge = backEdgeFor(address, basePiece.address);
+      const piece = createPiece(address, basePiece.mirrored, 0, 0, 0, "candidate", variant);
+      alignAcrossEdge(piece, alignEdge, transformedEdge(basePiece, edge), transformedTriangle(basePiece)[edge]);
+      return { piece, source: basePiece, edge, alignEdge, mirrorMode: false };
+    });
+    candidates.sort((a, b) => angleDistance(a.piece.rotation, basePiece.rotation) - angleDistance(b.piece.rotation, basePiece.rotation));
+    return candidates[0] ?? null;
+  }
+
+  function alignAcrossEdge(piece, alignEdge, targetEdge, baseOpposite) {
+    const local = localEdge(piece, alignEdge);
+    applyEdgeAlignment(piece, local[0], local[1], targetEdge[1], targetEdge[0]);
+    if (isOppositeSide(baseOpposite, transformedTriangle(piece)[alignEdge], targetEdge)) return;
+    applyEdgeAlignment(piece, local[0], local[1], targetEdge[0], targetEdge[1]);
+  }
+
+  function exportJson() {
+    return JSON.stringify(compactJson(), null, 2);
+  }
+
+  function loadJson(payload) {
+    const data = typeof payload === "string" ? JSON.parse(payload) : payload;
+    if (!data || ![2, 3].includes(data.version) || !Array.isArray(data.pieces)) {
+      throw new Error("Unsupported tile JSON");
+    }
+    state.depth = Number(data.depth ?? state.depth);
+    state.mirrorMode = !!data.mirrorMode;
+    state.pieces = data.pieces.map((item, index) => {
+      const v3 = data.version === 3;
+      const face = Number(item[0]);
+      const variant = v3 ? Number(item[1] ?? 0) : 0;
+      const root = Number(v3 ? item[2] : item[1]);
+      const pathString = String(v3 ? item[3] ?? "" : item[2] ?? "");
+      const path = pathString === "root" ? [] : pathString.split("").filter(Boolean).map(Number);
+      const address = addressFromNode(face, variant, root, path, state.orientation);
+      return {
+        id: `p${index + 1}`,
+        address,
+        variant,
+        mirrored: item[v3 ? 4 : 3] === 1,
+        x: Number(item[v3 ? 5 : 4] ?? state.size.width * 0.5),
+        y: Number(item[v3 ? 6 : 5] ?? state.size.height * 0.5),
+        rotation: Number(item[v3 ? 7 : 6] ?? 0),
+      };
+    });
+    state.nextId = state.pieces.length + 1;
+    state.selectedPieceId = state.pieces[0]?.id ?? null;
+    updateSelectionList();
+    render();
+  }
+
+  async function exportTileSet(polygons, options) {
+    if (!state.pieces.length) throw new Error("Constructor has no tiles to export");
+    const svg = renderConstructedSvg(polygons, options);
+    if (options.type === "png") {
+      const resolution = Number(options.pngResolution) || 1024;
+      return {
+        filename: "constructed-tile-set.png",
+        blob: new Blob([await svgToPngBytes(svg, resolution, resolution)], { type: "image/png" }),
+      };
+    }
+    return {
+      filename: "constructed-tile-set.svg",
+      blob: new Blob([svg], { type: "image/svg+xml" }),
+    };
+  }
+
+  function renderConstructedSvg(polygons, options) {
+    const bounds = boundsForPieces(state.pieces);
+    const padding = 8;
+    const targetSize = options.type === "png"
+      ? Number(options.pngResolution) || 1024
+      : Number(options.svgScale) || 1024;
+    const sourceWidth = Math.max(1, bounds.maxX - bounds.minX);
+    const sourceHeight = Math.max(1, bounds.maxY - bounds.minY);
+    const scale = (targetSize - padding * 2) / Math.max(sourceWidth, sourceHeight);
+    const offsetX = (targetSize - sourceWidth * scale) * 0.5;
+    const offsetY = (targetSize - sourceHeight * scale) * 0.5;
+    const projectScreen = (point) => [
+      (point[0] - bounds.minX) * scale + offsetX,
+      (point[1] - bounds.minY) * scale + offsetY,
+    ];
+    const parts = state.pieces.map((piece, index) => {
+      const geometry = {
+        trianglePath: transformedTriangle(piece).map(projectScreen),
+        project: (u, v) => projectScreen(screenPointForUV(piece, u, v)),
+      };
+      const fragment = renderTriangleSvgFragment(piece.address, polygons, {
+        ...options,
+        orientation: state.orientation,
+        mirrored: piece.mirrored,
+      }, geometry).replaceAll('id="', `id="piece${index + 1}-`);
+      return `<g data-piece="${piece.id}" data-address="${escapeAttr(addressVariantKey(piece.address))}" data-variant="${piece.variant}" data-mirrored="${piece.mirrored ? "1" : "0"}">${fragment}</g>`;
+    });
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="${SVG_NS}" width="${round(targetSize)}" height="${round(targetSize)}" viewBox="0 0 ${round(targetSize)} ${round(targetSize)}">
+${parts.join("\n")}
+</svg>
+`;
+  }
+
+  function compactJson() {
+    return {
+      version: 3,
+      mode: "grid-painter",
+      depth: state.depth,
+      anchor: state.orientation?.offsets ?? { lon: 0, lat: 0, roll: 0 },
+      mirrorMode: state.mirrorMode,
+      seedKey: state.seedKey,
+      pieces: state.pieces.map((piece) => [
+        piece.address.face,
+        piece.variant,
+        piece.address.root,
+        piece.address.path.join(""),
+        piece.mirrored ? 1 : 0,
+        round(piece.x),
+        round(piece.y),
+        round(piece.rotation),
+      ]),
+    };
+  }
+
+  function updateSelectionList() {
+    const rows = [
+      ["seed", state.seedKey || "none"],
+      ["mode", state.mirrorMode ? "mirror" : "regular"],
+      ["zoom", `${Math.round(state.view.scale * 100)}%`],
+      ["depth", String(state.depth)],
+      ["tiles", String(state.pieces.length)],
+    ];
+    const piece = selectedPiece();
+    if (piece) {
+      rows.splice(4, 0, ["piece", piece.id], ["tile", pieceLabel(piece)], ["mirror", piece.mirrored ? "yes" : "no"]);
+    } else {
+      rows.splice(4, 0, ["piece", "none"]);
+    }
+    config.renderDefinitionList(config.selectionList, rows);
+    config.modeValue.textContent = state.mirrorMode ? "mirror" : "regular";
+  }
+
+  function drawPiece(ctx, piece) {
+    const vertices = transformedTriangle(piece);
+    if (state.polygons?.length) {
+      drawCachedPieceMap(ctx, piece);
+    } else {
+      ctx.save();
+      pathPolygon(ctx, vertices);
+      ctx.fillStyle = state.style?.ocean ?? "#102725";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.save();
+    pathPolygon(ctx, vertices);
+    ctx.strokeStyle = piece.id === state.selectedPieceId ? "#f0b35a" : "rgba(243,239,230,0.42)";
+    ctx.lineWidth = worldLineWidth(piece.id === state.selectedPieceId ? 1.8 : 1);
+    ctx.stroke();
+    const center = centroid(vertices);
+    ctx.fillStyle = piece.mirrored ? "#e86f75" : "#37c8b1";
+    ctx.font = `700 ${worldFontSize(11)}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${piece.address.face}.${piece.variant}:${piece.address.path.join("") || "r"}`, center[0], center[1]);
+    ctx.restore();
+  }
+
+  function drawCachedPieceMap(ctx, piece) {
+    const cacheKey = [
+      addressKey(piece.address),
+      piece.variant,
+      piece.mirrored ? "m" : "o",
+      round(piece.rotation),
+      state.cacheSignature,
+    ].join(":");
+    let cached = state.mapCache.get(cacheKey);
+    if (!cached) {
+      cached = renderPieceMap(piece);
+      state.mapCache.set(cacheKey, cached);
+    }
+    ctx.drawImage(cached.canvas, piece.x + cached.bounds.minX, piece.y + cached.bounds.minY);
+  }
+
+  function renderPieceMap(piece) {
+    const angle = piece.rotation;
+    const rotatedVertices = localTriangle(piece).map((point) => rotatePoint(point, angle));
+    const bounds = boundsForPoints(rotatedVertices);
+    const padding = Math.max(3, state.style.coastWidth + 2);
+    const width = Math.max(1, Math.ceil(bounds.maxX - bounds.minX + padding * 2));
+    const height = Math.max(1, Math.ceil(bounds.maxY - bounds.minY + padding * 2));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const localCtx = canvas.getContext("2d");
+    const toCachePoint = (point) => [
+      point[0] - bounds.minX + padding,
+      point[1] - bounds.minY + padding,
+    ];
+    const trianglePath = rotatedVertices.map(toCachePoint);
+    pathPolygon(localCtx, trianglePath);
+    localCtx.fillStyle = state.style.ocean;
+    localCtx.fill();
+    drawLandOnTriangle(
+      localCtx,
+      piece.address,
+      trianglePath,
+      (u, v) => toCachePoint(rotatePoint(localPointForUV(piece, u, v), angle)),
+      state.polygons,
+      state.style,
+      state.orientation,
+      true,
+    );
+    return {
+      canvas,
+      bounds: {
+        minX: bounds.minX - padding,
+        minY: bounds.minY - padding,
+      },
+    };
+  }
+
+  function drawCandidate(ctx, candidate) {
+    const vertices = transformedTriangle(candidate.piece);
+    ctx.save();
+    pathPolygon(ctx, vertices);
+    ctx.fillStyle = candidate.mirrorMode ? "rgba(232,111,117,0.12)" : "rgba(55,200,177,0.1)";
+    ctx.strokeStyle = candidate.mirrorMode ? "rgba(232,111,117,0.56)" : "rgba(55,200,177,0.5)";
+    ctx.lineWidth = worldLineWidth(1);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawEdgeLabels(ctx, piece) {
+    ctx.save();
+    ctx.font = `700 ${worldFontSize(12)}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let edge = 0; edge < 3; edge += 1) {
+      const points = transformedEdge(piece, edge);
+      const mid = midpoint(points[0], points[1]);
+      ctx.fillStyle = state.mirrorMode ? "#e86f75" : "#f0b35a";
+      ctx.fillText(EDGE_KEYS[edge], mid[0], mid[1]);
+    }
+    ctx.restore();
+  }
+
+  function drawBackground(ctx, width, height) {
+    ctx.fillStyle = "#0c0c0b";
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  function drawTriangularGrid(ctx, bounds) {
+    const spacing = state.gridSide * Math.sqrt(3) * 0.5;
+    const width = bounds.maxX - bounds.minX;
+    const height = bounds.maxY - bounds.minY;
+    const length = Math.hypot(width, height) * 1.4;
+    const center = [(bounds.minX + bounds.maxX) * 0.5, (bounds.minY + bounds.maxY) * 0.5];
+    ctx.save();
+    ctx.strokeStyle = "rgba(243,239,230,0.055)";
+    ctx.lineWidth = worldLineWidth(1);
+    for (const direction of [[0, 1], [Math.sqrt(3) * 0.5, 0.5], [-Math.sqrt(3) * 0.5, 0.5]]) {
+      const normal = [-direction[1], direction[0]];
+      for (let offset = -length; offset <= length; offset += spacing) {
+        const cx = center[0] + normal[0] * offset;
+        const cy = center[1] + normal[1] * offset;
+        ctx.beginPath();
+        ctx.moveTo(cx - direction[0] * length, cy - direction[1] * length);
+        ctx.lineTo(cx + direction[0] * length, cy + direction[1] * length);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawEmptyState(ctx, width, height) {
+    ctx.save();
+    ctx.fillStyle = "rgba(243,239,230,0.42)";
+    ctx.font = "600 13px Inter, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Place the seed tile, then paint legal neighboring cells.", width * 0.5, height * 0.5);
+    ctx.restore();
+  }
+
+  function selectedPiece() {
+    return state.pieces.find((piece) => piece.id === state.selectedPieceId) ?? null;
+  }
+
+  function findPieceAtCell(target) {
+    return state.pieces.find((piece) => sameCell(piece, target)) ?? null;
+  }
+
+  function pickPiece(x, y) {
+    for (let index = state.pieces.length - 1; index >= 0; index -= 1) {
+      const piece = state.pieces[index];
+      if (pointInPolygon([x, y], transformedTriangle(piece))) return piece;
+    }
+    return null;
+  }
+
+  function pickCandidate(x, y) {
+    return buildCandidates().find((candidate) => pointInPolygon([x, y], transformedTriangle(candidate.piece))) ?? null;
+  }
+
+  function parseSeedKey(value) {
+    const [faceToken, rootRaw, pathRaw = ""] = value.split(":");
+    const [faceRaw, variantRaw = "0"] = faceToken.split(".");
+    const face = Number(faceRaw);
+    const variant = Number(variantRaw);
+    const root = Number(rootRaw);
+    const path = pathRaw === "root" ? [] : pathRaw.split("").filter(Boolean).map(Number);
+    if (!Number.isInteger(face) || face < 0 || face > 5) throw new Error("Seed face must be 0..5");
+    if (!Number.isInteger(variant) || variant < 0 || variant > 1) throw new Error("Seed variant must be 0..1");
+    if (!Number.isInteger(root) || root < 0 || root > 1) throw new Error("Seed root must be 0..1");
+    if (path.some((child) => !Number.isInteger(child) || child < 0 || child > 3)) throw new Error("Seed path must contain only 0..3");
+    if (path.length !== state.depth) throw new Error(`Seed path depth must be ${state.depth}`);
+    return addressFromNode(face, variant, root, path, state.orientation);
+  }
+
+  function createPiece(address, mirrored, x, y, rotation, id = `p${state.nextId++}`, variant = address.variant ?? 0) {
+    const pieceAddress = cloneAddress({ ...address, variant });
+    return {
+      id,
+      address: pieceAddress,
+      variant,
+      mirrored,
+      x,
+      y,
+      rotation,
+    };
+  }
+
+  function centerPiece(piece, x, y) {
+    const current = centroid(transformedTriangle(piece));
+    piece.x += x - current[0];
+    piece.y += y - current[1];
+  }
+
+  function addressFromNode(face, variant, root, path, orientation) {
+    const vertices = path.reduce(
+      (current, child) => childTriangleVertices(current, child),
+      rootTriangleVertices(face, root, orientation),
+    );
+    const uv = centroid(vertices);
+    return {
+      ...uvToTriAddress(face, uv[0], uv[1], path.length, orientation),
+      root,
+      rootName: rootTriangleName(face, root, orientation),
+      path: path.slice(),
+      depth: path.length,
+      pathBits: packPath(path).toString(),
+      barycentric: [1 / 3, 1 / 3, 1 / 3],
+      uv,
+      variant,
+      orientation,
+    };
+  }
+
+  function pieceLabel(piece) {
+    return `F${piece.address.face}.${piece.variant}/r${piece.address.root}/${piece.address.path.join("") || "root"}`;
+  }
+
+  function cloneAddress(address) {
+    return {
+      ...address,
+      path: [...(address.path ?? [])],
+      uv: [...(address.uv ?? [])],
+      barycentric: [...(address.barycentric ?? [])],
+      variant: address.variant ?? 0,
+      orientation: state.orientation,
+    };
+  }
+
+  function sameCandidate(a, b) {
+    return sameCell(a, b);
+  }
+
+  function localTriangle(piece) {
+    return triangleVerticesFromAddress(piece.address, state.orientation).map(([u, v]) => localPointForUV(piece, u, v));
+  }
+
+  function transformedTriangle(piece) {
+    return localTriangle(piece).map((point) => transformLocal(piece, point));
+  }
+
+  function localPointForUV(piece, u, v) {
+    const variant = piece.variant ?? piece.address.variant ?? 0;
+    const center = isoProjectFaceUV(piece.address.face, 0.5, 0.5, variant);
+    const edgeA = isoProjectFaceUV(piece.address.face, 0, 0, variant);
+    const edgeB = isoProjectFaceUV(piece.address.face, 1, 0, variant);
+    const side = Math.hypot(edgeB[0] - edgeA[0], edgeB[1] - edgeA[1]) || 1;
+    const scale = state.unitScale / side;
+    const projected = isoProjectFaceUV(piece.address.face, u, v, variant);
+    const point = [
+      (projected[0] - center[0]) * scale,
+      (projected[1] - center[1]) * scale,
+    ];
+    return piece.mirrored ? [-point[0], point[1]] : point;
+  }
+
+  function screenPointForUV(piece, u, v) {
+    return transformLocal(piece, localPointForUV(piece, u, v));
+  }
+
+  function localEdge(piece, edge) {
+    const vertices = localTriangle(piece);
+    return [vertices[(edge + 1) % 3], vertices[(edge + 2) % 3]];
+  }
+
+  function transformedEdge(piece, edge) {
+    const vertices = transformedTriangle(piece);
+    return [vertices[(edge + 1) % 3], vertices[(edge + 2) % 3]];
+  }
+
+  function transformLocal(piece, point) {
+    const angle = piece.rotation * Math.PI / 180;
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    return [
+      point[0] * c - point[1] * s + piece.x,
+      point[0] * s + point[1] * c + piece.y,
+    ];
+  }
+
+  function applyEdgeAlignment(piece, localA, localB, targetA, targetB) {
+    const localAngle = Math.atan2(localB[1] - localA[1], localB[0] - localA[0]);
+    const targetAngle = Math.atan2(targetB[1] - targetA[1], targetB[0] - targetA[0]);
+    piece.rotation = (targetAngle - localAngle) * 180 / Math.PI;
+    const rotatedA = rotatePoint(localA, piece.rotation);
+    piece.x = targetA[0] - rotatedA[0];
+    piece.y = targetA[1] - rotatedA[1];
+  }
+
+  function backEdgeFor(address, targetAddress) {
+    for (let edge = 0; edge < 3; edge += 1) {
+      const neighbor = neighborTriangleAddress(address, edge, address.depth, state.orientation);
+      if (addressKey(neighbor) === addressKey(targetAddress)) return edge;
+    }
+    return 0;
+  }
+
+  function screenToWorldPoint(point) {
+    return {
+      x: (point.x - state.view.x) / state.view.scale,
+      y: (point.y - state.view.y) / state.view.scale,
+    };
+  }
+
+  function visibleWorldBounds() {
+    const corners = [
+      screenToWorldPoint({ x: 0, y: 0 }),
+      screenToWorldPoint({ x: state.size.width, y: 0 }),
+      screenToWorldPoint({ x: state.size.width, y: state.size.height }),
+      screenToWorldPoint({ x: 0, y: state.size.height }),
+    ];
+    return corners.reduce((bounds, point) => ({
+      minX: Math.min(bounds.minX, point.x),
+      minY: Math.min(bounds.minY, point.y),
+      maxX: Math.max(bounds.maxX, point.x),
+      maxY: Math.max(bounds.maxY, point.y),
+    }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  }
+
+  function worldLineWidth(px) {
+    return px / state.view.scale;
+  }
+
+  function worldFontSize(px) {
+    return px / state.view.scale;
+  }
+
+  function sameCell(a, b) {
+    const ca = pieceCenter(a);
+    const cb = pieceCenter(b);
+    return Math.hypot(ca[0] - cb[0], ca[1] - cb[1]) < Math.max(1, state.gridSide * 0.2);
+  }
+
+  function pieceCenter(piece) {
+    return centroid(transformedTriangle(piece));
+  }
+
+  function boundsForPieces(pieces) {
+    const all = pieces.flatMap((piece) => transformedTriangle(piece));
+    return all.reduce((bounds, point) => ({
+      minX: Math.min(bounds.minX, point[0]),
+      minY: Math.min(bounds.minY, point[1]),
+      maxX: Math.max(bounds.maxX, point[0]),
+      maxY: Math.max(bounds.maxY, point[1]),
+    }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  }
+}
+
+function gridSideForDepth(depth) {
+  return Math.max(24, Math.min(108, 320 / (2 ** depth)));
+}
+
+function addressVariantKey(address) {
+  return `${address.face}.${address.variant ?? 0}:${address.root}:${(address.path ?? []).join("") || "root"}`;
+}
+
+function canvasPoint(event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function centroid(points) {
+  return [
+    points.reduce((sum, point) => sum + point[0], 0) / points.length,
+    points.reduce((sum, point) => sum + point[1], 0) / points.length,
+  ];
+}
+
+function midpoint(a, b) {
+  return [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+}
+
+function boundsForPoints(points) {
+  return points.reduce((bounds, point) => ({
+    minX: Math.min(bounds.minX, point[0]),
+    minY: Math.min(bounds.minY, point[1]),
+    maxX: Math.max(bounds.maxX, point[0]),
+    maxY: Math.max(bounds.maxY, point[1]),
+  }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+}
+
+function rotatePoint(point, deg) {
+  const angle = deg * Math.PI / 180;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [
+    point[0] * c - point[1] * s,
+    point[0] * s + point[1] * c,
+  ];
+}
+
+function isOppositeSide(a, b, edge) {
+  const edgeVector = [edge[1][0] - edge[0][0], edge[1][1] - edge[0][1]];
+  const ca = cross2(edgeVector, [a[0] - edge[0][0], a[1] - edge[0][1]]);
+  const cb = cross2(edgeVector, [b[0] - edge[0][0], b[1] - edge[0][1]]);
+  return ca * cb < 0;
+}
+
+function cross2(a, b) {
+  return a[0] * b[1] - a[1] * b[0];
+}
+
+function angleDistance(a, b) {
+  const delta = ((((a - b + 180) % 360) + 360) % 360) - 180;
+  return Math.abs(delta);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const a = polygon[i];
+    const b = polygon[j];
+    const crosses = ((a[1] > point[1]) !== (b[1] > point[1]))
+      && (point[0] < (b[0] - a[0]) * (point[1] - a[1]) / ((b[1] - a[1]) || 1e-9) + a[0]);
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function pathPolygon(ctx, points) {
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point[0], point[1]);
+    else ctx.lineTo(point[0], point[1]);
+  });
+  ctx.closePath();
+}
+
+function svgToPngBytes(svg, width, height) {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([svg], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(async (pngBlob) => {
+        if (!pngBlob) {
+          reject(new Error("PNG encode failed"));
+          return;
+        }
+        resolve(new Uint8Array(await pngBlob.arrayBuffer()));
+      }, "image/png");
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("SVG rasterization failed"));
+    };
+    img.src = url;
+  });
+}
+
+function escapeAttr(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function round(value) {
+  return Number(value).toFixed(3).replace(/\.?0+$/, "");
+}
