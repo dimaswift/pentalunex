@@ -202,6 +202,31 @@
           <output id="constructorRotationValue">0</output>
           <input id="constructorRotationInput" type="range" min="0" max="360" step="1" value="0">
         </label>
+        <label class="select-field">
+          <span>Saros</span>
+          <select id="sarosNumberInput">
+            <option value="">None</option>
+          </select>
+        </label>
+        <label class="select-field">
+          <span>Saros position</span>
+          <select id="sarosPositionInput" disabled>
+            <option value="">Select saros first</option>
+          </select>
+        </label>
+        <label class="color-row">
+          <span>Eclipse path</span>
+          <input id="eclipseStrokeColorInput" type="color" value="#ffd16c">
+        </label>
+        <label class="color-row">
+          <span>Eclipse fill</span>
+          <input id="eclipseFillColorInput" type="color" value="#ffd16c">
+        </label>
+        <label class="field">
+          <span>Path thickness</span>
+          <output id="eclipseWidthValue">4.00</output>
+          <input id="eclipseWidthInput" type="range" min="0.25" max="24" step="0.25" value="4">
+        </label>
         <p class="mode-pill">Mode <strong id="constructorModeValue">regular</strong></p>
         <dl id="constructorSelectionList"></dl>
         <button id="addTileButton" type="button">Place seed</button>

@@ -11,6 +11,13 @@ import { drawGlobe, drawTrianglePreview } from "./map-render.js";
 import { exportAllTriangles, exportSelectedTriangle } from "./exporter.js";
 import { createTileConstructor } from "./constructor.js";
 import {
+  SAROS_NUMBERS,
+  eclipseOptionLabel,
+  eclipseSignature,
+  eclipseStatusLabel,
+  loadSarosSeries,
+} from "./saros-eclipses.js";
+import {
   faceEdgesForDisplay,
   lonLatForHit,
   pickTile,
@@ -48,6 +55,11 @@ const controls = {
   exportGraticuleColor: document.querySelector("#exportGraticuleColorInput"),
   exportGraticuleWidth: document.querySelector("#exportGraticuleWidthInput"),
   constructorRotation: document.querySelector("#constructorRotationInput"),
+  sarosNumber: document.querySelector("#sarosNumberInput"),
+  sarosPosition: document.querySelector("#sarosPositionInput"),
+  eclipseStroke: document.querySelector("#eclipseStrokeColorInput"),
+  eclipseFill: document.querySelector("#eclipseFillColorInput"),
+  eclipseWidth: document.querySelector("#eclipseWidthInput"),
 };
 
 const outputs = {
@@ -64,6 +76,7 @@ const outputs = {
   pngResolution: document.querySelector("#pngResolutionValue"),
   exportGraticuleWidth: document.querySelector("#exportGraticuleWidthValue"),
   constructorRotation: document.querySelector("#constructorRotationValue"),
+  eclipseWidth: document.querySelector("#eclipseWidthValue"),
   progress: document.querySelector("#exportProgress"),
   probe: document.querySelector("#probeList"),
   address: document.querySelector("#addressList"),
@@ -127,6 +140,18 @@ const state = {
   selectedAddress: null,
   selectedVariant: 0,
   constructorRotation: 0,
+  eclipse: {
+    sarosNumber: null,
+    position: 0,
+    series: [],
+    record: null,
+  },
+  eclipseStyle: {
+    stroke: "#ffd16c",
+    fill: "#ffd16c",
+    width: 4,
+    fillOpacity: 0.28,
+  },
   hoverAddress: null,
 };
 
@@ -171,6 +196,9 @@ function syncFromControls() {
   state.export.graticule.color = controls.exportGraticuleColor.value;
   state.export.graticule.width = Number(controls.exportGraticuleWidth.value);
   state.constructorRotation = Number(controls.constructorRotation.value);
+  state.eclipseStyle.stroke = controls.eclipseStroke.value;
+  state.eclipseStyle.fill = controls.eclipseFill.value;
+  state.eclipseStyle.width = Number(controls.eclipseWidth.value);
   state.selectedAddress = lonLatToTriAddress(state.lon, state.lat, state.depth, state.orientation, state.selectedVariant);
 
   outputs.lon.value = state.lon.toFixed(2);
@@ -186,6 +214,7 @@ function syncFromControls() {
   outputs.pngResolution.value = String(state.export.pngResolution);
   outputs.exportGraticuleWidth.value = state.export.graticule.width.toFixed(2);
   outputs.constructorRotation.value = String(state.constructorRotation);
+  outputs.eclipseWidth.value = state.eclipseStyle.width.toFixed(2);
   syncExportVisibility();
   renderInspector();
   tileConstructor.sync({
@@ -195,6 +224,8 @@ function syncFromControls() {
     polygons: state.landPolygons,
     seedAddress: state.selectedAddress,
     viewRotation: state.constructorRotation,
+    eclipse: selectedEclipseOverlay(),
+    eclipseStyle: state.eclipseStyle,
   });
   queueRender();
 }
@@ -343,7 +374,8 @@ function syncExportVisibility() {
   document.querySelectorAll(".export-graticule-control").forEach((node) => node.classList.toggle("hidden", !state.export.graticule.enabled));
 }
 
-function exportOptions() {
+function exportOptions({ includeEclipse = false } = {}) {
+  const eclipse = includeEclipse ? selectedEclipseOverlay() : null;
   return {
     type: state.export.type,
     depth: state.depth,
@@ -359,6 +391,13 @@ function exportOptions() {
       sampleStep: state.sampleStep,
     },
     style: { ...state.mapStyle },
+    eclipse: eclipse ? {
+      ...eclipse,
+      stroke: state.eclipseStyle.stroke,
+      fill: state.eclipseStyle.fill,
+      width: state.eclipseStyle.width,
+      fillOpacity: state.eclipseStyle.fillOpacity,
+    } : null,
   };
 }
 
@@ -439,6 +478,77 @@ function hideProgress() {
   outputs.progress.classList.add("hidden");
 }
 
+function selectedEclipseOverlay() {
+  const record = state.eclipse.record;
+  if (!record) return null;
+  return {
+    ...record,
+    signature: eclipseSignature(record),
+    label: eclipseStatusLabel(record),
+  };
+}
+
+function populateSarosOptions() {
+  controls.sarosNumber.replaceChildren(new Option("None", ""));
+  for (const number of SAROS_NUMBERS) {
+    controls.sarosNumber.append(new Option(String(number), String(number)));
+  }
+  controls.sarosPosition.disabled = true;
+  controls.sarosPosition.replaceChildren(new Option("Select saros first", ""));
+}
+
+async function handleSarosNumberChange() {
+  const value = controls.sarosNumber.value;
+  if (!value) {
+    state.eclipse = { sarosNumber: null, position: 0, series: [], record: null };
+    controls.sarosPosition.disabled = true;
+    controls.sarosPosition.replaceChildren(new Option("Select saros first", ""));
+    syncFromControls();
+    outputs.status.textContent = "eclipse overlay off";
+    return;
+  }
+
+  const sarosNumber = Number(value);
+  controls.sarosPosition.disabled = true;
+  controls.sarosPosition.replaceChildren(new Option("Loading...", ""));
+  outputs.status.textContent = `loading Saros ${sarosNumber}`;
+  try {
+    const series = await loadSarosSeries(sarosNumber);
+    state.eclipse.sarosNumber = sarosNumber;
+    state.eclipse.series = series;
+    const preferred = series.findIndex((record) => record.type === "T" || record.type === "A" || record.type === "H");
+    const position = Math.max(0, preferred);
+    state.eclipse.position = position;
+    state.eclipse.record = series[position] ?? null;
+    renderSarosPositionOptions(series, position);
+    syncFromControls();
+    outputs.status.textContent = eclipseStatusLabel(state.eclipse.record);
+  } catch (error) {
+    state.eclipse = { sarosNumber: null, position: 0, series: [], record: null };
+    controls.sarosPosition.replaceChildren(new Option("Unavailable", ""));
+    controls.sarosPosition.disabled = true;
+    outputs.status.textContent = error.message;
+    syncFromControls();
+  }
+}
+
+function renderSarosPositionOptions(series, selectedPosition) {
+  controls.sarosPosition.replaceChildren();
+  for (const record of series) {
+    controls.sarosPosition.append(new Option(eclipseOptionLabel(record), String(record.sarosPosition)));
+  }
+  controls.sarosPosition.value = String(selectedPosition);
+  controls.sarosPosition.disabled = series.length === 0;
+}
+
+function handleSarosPositionChange() {
+  const position = Number(controls.sarosPosition.value);
+  state.eclipse.position = position;
+  state.eclipse.record = state.eclipse.series[position] ?? null;
+  syncFromControls();
+  outputs.status.textContent = eclipseStatusLabel(state.eclipse.record);
+}
+
 function setActiveTab(tabName, updateHash = true) {
   state.activeTab = tabName;
   for (const [name, view] of Object.entries(views)) view.classList.toggle("active", name === tabName);
@@ -462,7 +572,7 @@ async function exportConstructed() {
   try {
     outputs.status.textContent = "exporting constructed set";
     const polygons = await ensureLandPolygons();
-    const artifact = await tileConstructor.exportTileSet(polygons, exportOptions());
+    const artifact = await tileConstructor.exportTileSet(polygons, exportOptions({ includeEclipse: true }));
     downloadBlob(artifact.filename, artifact.blob, artifact.blob.type || "application/octet-stream");
     outputs.status.textContent = `exported ${artifact.filename}`;
   } catch (error) {
@@ -493,9 +603,13 @@ async function handleTileJsonFile(event) {
 }
 
 for (const [name, control] of Object.entries(controls)) {
-  if (name !== "constructorRotation") control.addEventListener("input", syncFromControls);
+  if (!["constructorRotation", "sarosNumber", "sarosPosition"].includes(name)) {
+    control.addEventListener("input", syncFromControls);
+  }
 }
 controls.constructorRotation.addEventListener("input", syncConstructorRotation);
+controls.sarosNumber.addEventListener("change", handleSarosNumberChange);
+controls.sarosPosition.addEventListener("change", handleSarosPositionChange);
 
 function syncConstructorRotation() {
   state.constructorRotation = Number(controls.constructorRotation.value);
@@ -542,6 +656,7 @@ new ResizeObserver(resizeCanvas).observe(canvas);
 new ResizeObserver(() => tileConstructor.resize()).observe(constructorCanvas);
 new ResizeObserver(() => queueRender()).observe(globeCanvas);
 new ResizeObserver(() => queueRender()).observe(triangleCanvas);
+populateSarosOptions();
 syncFromControls();
 setActiveTab(window.location.hash === "#constructor" ? "constructor" : "atlas", false);
 
@@ -556,6 +671,8 @@ getLandPolygons().then((polygons) => {
     polygons: state.landPolygons,
     seedAddress: state.selectedAddress,
     viewRotation: state.constructorRotation,
+    eclipse: selectedEclipseOverlay(),
+    eclipseStyle: state.eclipseStyle,
   });
   queueRender();
 }).catch((error) => {

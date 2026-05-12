@@ -11,8 +11,13 @@ import {
   triangleVerticesFromAddress,
   uvToTriAddress,
 } from "./spherecube.js";
-import { renderBacksideSvgFragment, renderTriangleSvgFragment, tileBacksideLabel } from "./exporter.js";
-import { drawLandOnTriangle } from "./map-render.js";
+import {
+  renderBacksideSvgFragment,
+  renderEclipseSvgFragment,
+  renderTriangleSvgFragment,
+  tileBacksideLabel,
+} from "./exporter.js";
+import { drawEclipseOnTriangle, drawLandOnTriangle } from "./map-render.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const EDGE_KEYS = ["1", "2", "3"];
@@ -31,6 +36,8 @@ export function createTileConstructor(config) {
     orientation: null,
     style: null,
     polygons: null,
+    eclipse: null,
+    eclipseStyle: { stroke: "#ffd16c", fill: "#ffd16c", width: 4, fillOpacity: 0.28 },
     mapCache: new Map(),
     cacheSignature: "",
     active: false,
@@ -75,10 +82,17 @@ export function createTileConstructor(config) {
     state.view.rotation = Number(next.viewRotation ?? state.view.rotation ?? 0);
     state.style = next.style;
     state.polygons = next.polygons;
+    state.eclipse = next.eclipse ?? null;
+    state.eclipseStyle = next.eclipseStyle ?? state.eclipseStyle;
     state.gridSide = gridSideForDepth(state.depth);
     state.unitScale = state.gridSide * (2 ** state.depth);
     const cacheSignature = [
       state.polygons?.length ?? 0,
+      state.eclipse?.signature ?? "no-eclipse",
+      state.eclipseStyle?.stroke,
+      state.eclipseStyle?.fill,
+      state.eclipseStyle?.width,
+      state.eclipseStyle?.fillOpacity,
       state.style?.ocean,
       state.style?.land,
       state.style?.coast,
@@ -682,9 +696,27 @@ export function createTileConstructor(config) {
         ...options,
         orientation: state.orientation,
         mirrored: piece.mirrored,
+        eclipse: null,
       }, geometry).replaceAll('id="', `id="piece${index + 1}-`);
       return `<g data-piece="${piece.id}" data-address="${escapeAttr(addressVariantKey(piece.address))}" data-variant="${piece.variant}" data-mirrored="${piece.mirrored ? "1" : "0"}">${fragment}</g>`;
     });
+    const eclipseParts = options.eclipse?.geometry ? state.pieces.map((piece, index) => {
+      const geometry = {
+        trianglePath: transformedTriangle(piece).map(projectScreen),
+        project: (u, v) => projectScreen(screenPointForUV(piece, u, v)),
+      };
+      return renderEclipseSvgFragment(piece.address, {
+        ...options,
+        orientation: state.orientation,
+        mirrored: piece.mirrored,
+      }, geometry).replaceAll('id="', `id="piece${index + 1}-eclipse-`);
+    }).filter(Boolean) : [];
+    if (eclipseParts.length) {
+      const eclipse = options.eclipse;
+      parts.push(`<g id="eclipse" data-saros="${escapeAttr(eclipse.sarosNumber ?? "")}" data-position="${escapeAttr(eclipse.sarosPosition ?? "")}" data-type="${escapeAttr(eclipse.type ?? "")}">
+${eclipseParts.join("\n")}
+</g>`);
+    }
     if (options.backside?.enabled) {
       parts.push(...state.pieces.map((piece, index) => {
         const geometry = {
@@ -733,13 +765,14 @@ ${parts.join("\n")}
       ["mode", state.mirrorMode ? "mirror" : "regular"],
       ["zoom", `${Math.round(state.view.scale * 100)}%`],
       ["depth", String(state.depth)],
+      ["eclipse", state.eclipse?.label ?? "none"],
       ["tiles", String(state.pieces.length)],
     ];
     const piece = selectedPiece();
     if (piece) {
-      rows.splice(4, 0, ["piece", piece.id], ["tile", pieceLabel(piece)], ["mirror", piece.mirrored ? "yes" : "no"]);
+      rows.splice(5, 0, ["piece", piece.id], ["tile", pieceLabel(piece)], ["mirror", piece.mirrored ? "yes" : "no"]);
     } else {
-      rows.splice(4, 0, ["piece", "none"]);
+      rows.splice(5, 0, ["piece", "none"]);
     }
     config.renderDefinitionList(config.selectionList, rows);
     config.modeValue.textContent = state.mirrorMode ? "mirror" : "regular";
@@ -747,7 +780,7 @@ ${parts.join("\n")}
 
   function drawPiece(ctx, piece) {
     const vertices = transformedTriangle(piece);
-    if (state.polygons?.length) {
+    if (state.polygons?.length || state.eclipse?.geometry) {
       drawCachedPieceMap(ctx, piece);
     } else {
       ctx.save();
@@ -847,6 +880,22 @@ ${parts.join("\n")}
       state.orientation,
       true,
     );
+    if (state.eclipse?.geometry) {
+      drawEclipseOnTriangle(
+        localCtx,
+        piece.address,
+        trianglePath,
+        (u, v) => toCachePoint(rotatePoint(localPointForUV(piece, u, v), angle)),
+        state.eclipse,
+        {
+          fill: state.eclipseStyle?.fill ?? "#ffd16c",
+          fillOpacity: state.eclipseStyle?.fillOpacity ?? 0.28,
+          stroke: state.eclipseStyle?.stroke ?? "#ffd16c",
+          width: Math.max(1.2, (state.eclipseStyle?.width ?? 4) * rasterScale),
+        },
+        state.orientation,
+      );
+    }
     return {
       canvas,
       bounds: {

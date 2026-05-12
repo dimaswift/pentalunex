@@ -203,7 +203,50 @@ return `
   ${options.graticule?.enabled ? `<g id="graticule" fill="none" stroke="${escapeAttr(options.graticule.color)}" stroke-width="${round(options.graticule.width)}" stroke-linejoin="round" stroke-linecap="round">
     ${graticulePaths.map((path) => `<path d="${path}"/>`).join("\n    ")}
   </g>` : ""}
+  ${renderEclipseSvgFragment(address, options, geometry)}
 `;
+}
+
+export function renderEclipseSvgFragment(address, options = {}, geometry) {
+  const eclipse = options.eclipse;
+  if (!eclipse?.geometry || eclipse.enabled === false) return "";
+  const orientation = options.orientation ?? address.orientation;
+  const lineOnly = eclipse.lineOnly ?? (isPartialEclipseType(eclipse.type) || /LineString$/.test(eclipse.geometry.type));
+  const fillPaths = [];
+  const strokePaths = [];
+
+  for (const rings of geometryRingSets(eclipse.geometry)) {
+    if (lineOnly) {
+      for (const ring of rings) {
+        strokePaths.push(...projectRingCoastToTriangle(ring, address.face, geometry.project, geometry.trianglePath, orientation));
+      }
+      continue;
+    }
+
+    const fillParts = [];
+    for (const ring of rings) {
+      const points = projectRingToTriangle(ring, address.face, geometry.project, orientation);
+      const clipped = clipPolygonToConvex(points, geometry.trianglePath);
+      if (clipped.length >= 3) fillParts.push(pathFromPoints(clipped));
+      strokePaths.push(...projectRingCoastToTriangle(ring, address.face, geometry.project, geometry.trianglePath, orientation));
+    }
+    if (fillParts.length) fillPaths.push(fillParts.join(" "));
+  }
+
+  if (!fillPaths.length && !strokePaths.length) return "";
+  const fill = eclipse.fill ?? "#ffd16c";
+  const stroke = eclipse.stroke ?? "#ffd16c";
+  const width = Number(eclipse.width) || 4;
+  const fillOpacity = eclipse.fillOpacity ?? 0.28;
+
+return `<g id="eclipse" data-saros="${escapeAttr(eclipse.sarosNumber ?? "")}" data-position="${escapeAttr(eclipse.sarosPosition ?? "")}" data-date="${escapeAttr(eclipse.datetime_utc ?? "")}" data-type="${escapeAttr(eclipse.type ?? "")}">
+    ${fillPaths.length && !lineOnly ? `<g id="eclipse-fill" fill="${escapeAttr(fill)}" fill-opacity="${round(fillOpacity)}" stroke="none" fill-rule="evenodd">
+      ${fillPaths.map((path) => `<path d="${path}"/>`).join("\n      ")}
+    </g>` : ""}
+    <g id="eclipse-path" fill="none" stroke="${escapeAttr(stroke)}" stroke-width="${round(width)}" stroke-linejoin="round" stroke-linecap="round">
+      ${strokePaths.map((path) => `<path d="${path}"/>`).join("\n      ")}
+    </g>
+  </g>`;
 }
 
 export async function renderTrianglePng(address, polygons, options = {}) {
@@ -423,6 +466,18 @@ function triangleGeometry(address, width, height, mirrored, orientation) {
     trianglePath: vertices.map(([u, v]) => project(u, v)),
     project,
   };
+}
+
+function geometryRingSets(geometry) {
+  if (geometry.type === "Polygon") return [geometry.coordinates];
+  if (geometry.type === "MultiPolygon") return geometry.coordinates;
+  if (geometry.type === "LineString") return [[geometry.coordinates]];
+  if (geometry.type === "MultiLineString") return geometry.coordinates.map((line) => [line]);
+  return [];
+}
+
+function isPartialEclipseType(type) {
+  return ["P", "Pb", "Pe", "Aminus", "Aplus", "Tminus", "Tplus"].includes(type);
 }
 
 function projectRingToTriangle(ring, face, projectUV, orientation) {

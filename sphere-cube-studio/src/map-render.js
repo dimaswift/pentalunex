@@ -71,6 +71,57 @@ export function drawLandOnTriangle(ctx, address, trianglePath, projectUV, polygo
   ctx.restore();
 }
 
+export function drawEclipseOnTriangle(ctx, address, trianglePath, projectUV, eclipse, style, orientation) {
+  if (!eclipse?.geometry) return;
+  const lineOnly = style?.lineOnly ?? (isPartialEclipseType(eclipse.type) || /LineString$/.test(eclipse.geometry.type));
+  ctx.save();
+  clipToPolygon(ctx, trianglePath);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.strokeStyle = style?.stroke ?? "#ffcf66";
+  ctx.fillStyle = style?.fill ?? "rgba(240,179,90,0.28)";
+  ctx.lineWidth = style?.width ?? 1.2;
+
+  for (const rings of geometryRingSets(eclipse.geometry)) {
+    if (lineOnly) {
+      for (const ring of rings) {
+        const points = projectRingToFace(ring, address.face, projectUV, orientation);
+        if (points.length < 2) continue;
+        ctx.beginPath();
+        points.forEach((point, index) => {
+          if (index === 0) ctx.moveTo(point[0], point[1]);
+          else ctx.lineTo(point[0], point[1]);
+        });
+        ctx.closePath();
+        ctx.stroke();
+      }
+      continue;
+    }
+
+    ctx.beginPath();
+    let hasRing = false;
+    for (const ring of rings) {
+      const points = projectRingToFace(ring, address.face, projectUV, orientation);
+      if (points.length < 3) continue;
+      points.forEach((point, index) => {
+        if (index === 0) ctx.moveTo(point[0], point[1]);
+        else ctx.lineTo(point[0], point[1]);
+      });
+      ctx.closePath();
+      hasRing = true;
+    }
+    if (!hasRing) continue;
+    if (style?.fill !== null) {
+      ctx.save();
+      ctx.globalAlpha *= style?.fillOpacity ?? 0.28;
+      ctx.fill("evenodd");
+      ctx.restore();
+    }
+    if ((style?.width ?? 1.2) > 0) ctx.stroke();
+  }
+  ctx.restore();
+}
+
 export function drawTrianglePreview(canvas, address, polygons, style, orientation = address?.orientation) {
   const ratio = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -250,6 +301,18 @@ function drawGlobeMarker(ctx, marker, globeState, cx, cy, radius) {
   ctx.lineWidth = 1;
   ctx.stroke();
   ctx.restore();
+}
+
+function geometryRingSets(geometry) {
+  if (geometry.type === "Polygon") return [geometry.coordinates];
+  if (geometry.type === "MultiPolygon") return geometry.coordinates;
+  if (geometry.type === "LineString") return [[geometry.coordinates]];
+  if (geometry.type === "MultiLineString") return geometry.coordinates.map((line) => [line]);
+  return [];
+}
+
+function isPartialEclipseType(type) {
+  return ["P", "Pb", "Pe", "Aminus", "Aplus", "Tminus", "Tplus"].includes(type);
 }
 
 function projectRingToFace(ring, face, projectUV, orientation) {

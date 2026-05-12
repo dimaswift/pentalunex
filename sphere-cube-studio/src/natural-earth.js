@@ -1,4 +1,4 @@
-export const COASTLINE_URL = "https://cdn.jsdelivr.net/gh/martynafford/natural-earth-geojson@master/10m/physical/ne_10m_land.json";
+export const COASTLINE_URL = "ne_50m_land.json";
 
 let coastlinePromise = null;
 let polygonPromise = null;
