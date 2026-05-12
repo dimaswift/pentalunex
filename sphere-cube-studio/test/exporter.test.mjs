@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   createTriangleManifest,
   enumerateTriangleAddresses,
+  renderBacksideSvg,
   renderTriangleSvg,
+  tileBacksideLabel,
 } from "../src/exporter.js";
 import { lonLatToTriAddress } from "../src/spherecube.js";
 
@@ -93,4 +95,50 @@ test("SVG export can omit coastline border layer", () => {
     style,
   });
   assert.doesNotMatch(svg, /id="coastlines"/);
+});
+
+test("backside SVG contains chirality key and global number", () => {
+  const address = lonLatToTriAddress(0, 0, 1);
+  const regular = renderBacksideSvg(address, {
+    type: "svg",
+    depth: 1,
+    mirror: false,
+    svgScale: 512,
+    pngResolution: 512,
+    backside: { enabled: true },
+    style,
+  }, 7);
+  const mirrored = renderBacksideSvg(address, {
+    type: "svg",
+    depth: 1,
+    mirror: false,
+    mirrored: true,
+    svgScale: 512,
+    pngResolution: 512,
+    backside: { enabled: true },
+    style,
+  }, 8);
+  assert.match(regular, /data-backside="true"/);
+  assert.match(regular, /#7/);
+  assert.match(regular, new RegExp(tileBacksideLabel(address, false).replaceAll(".", "\\.")));
+  assert.match(mirrored, /#8/);
+  assert.match(mirrored, new RegExp(tileBacksideLabel(address, true).replaceAll(".", "\\.")));
+});
+
+test("manifest records backside file and global tile number", () => {
+  const addresses = enumerateTriangleAddresses(0).slice(0, 1);
+  const manifest = createTriangleManifest(addresses, {
+    type: "svg",
+    depth: 0,
+    mirror: false,
+    svgScale: 512,
+    pngResolution: 512,
+    border: { enabled: true },
+    backside: { enabled: true },
+    graticule: { enabled: false, color: "#37c8b1", width: 0.6, step: 15, sampleStep: 1 },
+    style,
+  });
+  assert.equal(manifest.triangles[0].globalNumber, 1);
+  assert.match(manifest.triangles[0].backsideFile, /_backside\.svg$/);
+  assert.equal(manifest.triangles[0].backsideLabel, tileBacksideLabel(addresses[0], false));
 });

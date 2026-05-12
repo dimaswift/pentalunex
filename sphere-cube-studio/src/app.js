@@ -43,9 +43,11 @@ const controls = {
   pngResolution: document.querySelector("#pngResolutionInput"),
   mirror: document.querySelector("#mirrorInput"),
   exportBorder: document.querySelector("#exportBorderInput"),
+  exportBackside: document.querySelector("#exportBacksideInput"),
   exportGraticule: document.querySelector("#exportGraticuleInput"),
   exportGraticuleColor: document.querySelector("#exportGraticuleColorInput"),
   exportGraticuleWidth: document.querySelector("#exportGraticuleWidthInput"),
+  constructorRotation: document.querySelector("#constructorRotationInput"),
 };
 
 const outputs = {
@@ -61,6 +63,7 @@ const outputs = {
   svgScale: document.querySelector("#svgScaleValue"),
   pngResolution: document.querySelector("#pngResolutionValue"),
   exportGraticuleWidth: document.querySelector("#exportGraticuleWidthValue"),
+  constructorRotation: document.querySelector("#constructorRotationValue"),
   progress: document.querySelector("#exportProgress"),
   probe: document.querySelector("#probeList"),
   address: document.querySelector("#addressList"),
@@ -108,6 +111,9 @@ const state = {
     border: {
       enabled: true,
     },
+    backside: {
+      enabled: false,
+    },
     graticule: {
       enabled: false,
       color: "#37c8b1",
@@ -120,6 +126,7 @@ const state = {
   },
   selectedAddress: null,
   selectedVariant: 0,
+  constructorRotation: 0,
   hoverAddress: null,
 };
 
@@ -159,9 +166,11 @@ function syncFromControls() {
   state.export.pngResolution = Number(controls.pngResolution.value);
   state.export.mirror = controls.mirror.checked;
   state.export.border.enabled = controls.exportBorder.checked;
+  state.export.backside.enabled = controls.exportBackside.checked;
   state.export.graticule.enabled = controls.exportGraticule.checked;
   state.export.graticule.color = controls.exportGraticuleColor.value;
   state.export.graticule.width = Number(controls.exportGraticuleWidth.value);
+  state.constructorRotation = Number(controls.constructorRotation.value);
   state.selectedAddress = lonLatToTriAddress(state.lon, state.lat, state.depth, state.orientation, state.selectedVariant);
 
   outputs.lon.value = state.lon.toFixed(2);
@@ -176,6 +185,7 @@ function syncFromControls() {
   outputs.svgScale.value = String(state.export.svgScale);
   outputs.pngResolution.value = String(state.export.pngResolution);
   outputs.exportGraticuleWidth.value = state.export.graticule.width.toFixed(2);
+  outputs.constructorRotation.value = String(state.constructorRotation);
   syncExportVisibility();
   renderInspector();
   tileConstructor.sync({
@@ -184,6 +194,7 @@ function syncFromControls() {
     style: state.mapStyle,
     polygons: state.landPolygons,
     seedAddress: state.selectedAddress,
+    viewRotation: state.constructorRotation,
   });
   queueRender();
 }
@@ -341,6 +352,7 @@ function exportOptions() {
     pngResolution: state.export.pngResolution,
     orientation: state.orientation,
     border: { ...state.export.border },
+    backside: { ...state.export.backside },
     graticule: {
       ...state.export.graticule,
       step: state.graticuleStep,
@@ -480,8 +492,15 @@ async function handleTileJsonFile(event) {
   }
 }
 
-for (const control of Object.values(controls)) {
-  control.addEventListener("input", syncFromControls);
+for (const [name, control] of Object.entries(controls)) {
+  if (name !== "constructorRotation") control.addEventListener("input", syncFromControls);
+}
+controls.constructorRotation.addEventListener("input", syncConstructorRotation);
+
+function syncConstructorRotation() {
+  state.constructorRotation = Number(controls.constructorRotation.value);
+  outputs.constructorRotation.value = String(state.constructorRotation);
+  tileConstructor.setViewRotation(state.constructorRotation);
 }
 
 document.querySelector("#copyAddressButton").addEventListener("click", copyAddress);
@@ -536,6 +555,7 @@ getLandPolygons().then((polygons) => {
     style: state.mapStyle,
     polygons: state.landPolygons,
     seedAddress: state.selectedAddress,
+    viewRotation: state.constructorRotation,
   });
   queueRender();
 }).catch((error) => {

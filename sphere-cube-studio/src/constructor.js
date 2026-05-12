@@ -11,13 +11,14 @@ import {
   triangleVerticesFromAddress,
   uvToTriAddress,
 } from "./spherecube.js";
-import { renderTriangleSvgFragment } from "./exporter.js";
+import { renderBacksideSvgFragment, renderTriangleSvgFragment, tileBacksideLabel } from "./exporter.js";
 import { drawLandOnTriangle } from "./map-render.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const EDGE_KEYS = ["1", "2", "3"];
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 4;
+const MAX_MAP_CACHE_ITEMS = 180;
 
 export function createTileConstructor(config) {
   const state = {
@@ -36,7 +37,9 @@ export function createTileConstructor(config) {
     nextId: 1,
     gridSide: 80,
     unitScale: 320,
-    view: { x: 0, y: 0, scale: 1 },
+    view: { x: 0, y: 0, scale: 1, rotation: 0 },
+    visibleBounds: { minX: -1, minY: -1, maxX: 1, maxY: 1 },
+    candidateCache: { signature: "", candidates: [] },
     pan: null,
     size: { width: 1, height: 1, ratio: 1 },
   };
@@ -53,6 +56,7 @@ export function createTileConstructor(config) {
 
   return {
     sync,
+    setViewRotation,
     setActive,
     resize,
     render,
@@ -68,6 +72,7 @@ export function createTileConstructor(config) {
   function sync(next) {
     state.depth = next.depth;
     state.orientation = next.orientation;
+    state.view.rotation = Number(next.viewRotation ?? state.view.rotation ?? 0);
     state.style = next.style;
     state.polygons = next.polygons;
     state.gridSide = gridSideForDepth(state.depth);
@@ -104,6 +109,11 @@ export function createTileConstructor(config) {
     render();
   }
 
+  function setViewRotation(rotation) {
+    state.view.rotation = Number(rotation) || 0;
+    render();
+  }
+
   function resize() {
     measureCanvas();
     render();
@@ -131,10 +141,16 @@ export function createTileConstructor(config) {
     ctx.save();
     ctx.translate(state.view.x, state.view.y);
     ctx.scale(state.view.scale, state.view.scale);
-    drawTriangularGrid(ctx, visibleWorldBounds());
+    ctx.rotate(state.view.rotation * Math.PI / 180);
+    state.visibleBounds = visibleWorldBounds();
+    drawTriangularGrid(ctx, state.visibleBounds);
     const candidates = buildCandidates();
-    for (const candidate of candidates) drawCandidate(ctx, candidate);
-    for (const piece of state.pieces) drawPiece(ctx, piece);
+    for (const candidate of candidates) {
+      if (isPieceVisible(candidate.piece)) drawCandidate(ctx, candidate);
+    }
+    for (const piece of state.pieces) {
+      if (isPieceVisible(piece)) drawPiece(ctx, piece);
+    }
     const selected = selectedPiece();
     if (selected) drawEdgeLabels(ctx, selected);
     ctx.restore();
@@ -153,6 +169,7 @@ export function createTileConstructor(config) {
       ["Shift click", "deletes an existing tile"],
       ["Wheel", "zooms toward the cursor"],
       ["Drag", "pans from empty canvas space"],
+      ["Rotate", "uses the constructor orientation slider"],
       ["Space", "toggles regular/mirror paint mode"],
       ["1 2 3", "paint from selected edge"],
     ];
@@ -183,6 +200,7 @@ export function createTileConstructor(config) {
     centerPiece(piece, center.x, center.y);
     state.pieces.push(piece);
     state.selectedPieceId = piece.id;
+    state.candidateCache.signature = "";
     updateSelectionList();
     render();
     config.setStatus(`seeded ${pieceLabel(piece)}`);
@@ -192,6 +210,7 @@ export function createTileConstructor(config) {
     state.pieces = [];
     state.selectedPieceId = null;
     state.nextId = 1;
+    state.candidateCache.signature = "";
     updateSelectionList();
     render();
     config.setStatus("constructor cleared");
@@ -249,6 +268,7 @@ export function createTileConstructor(config) {
     state.seedAddress = newSeedAddress;
     config.seedInput.value = state.seedKey;
     state.mapCache.clear();
+    state.candidateCache.signature = "";
     updateSelectionList();
     render();
     const warning = unreached.length ? ` (${unreached.length} disconnected piece${unreached.length === 1 ? "" : "s"} kept old address)` : "";
@@ -259,6 +279,7 @@ export function createTileConstructor(config) {
     if (!state.active) return false;
     if (event.key === " ") {
       state.mirrorMode = !state.mirrorMode;
+      state.candidateCache.signature = "";
       updateSelectionList();
       render();
       config.setStatus(`paint mode ${state.mirrorMode ? "mirror" : "regular"}`);
@@ -285,6 +306,7 @@ export function createTileConstructor(config) {
         deletePiece(piece);
         return;
       }
+      if (cyclePieceVariant(piece)) return;
       state.selectedPieceId = piece.id;
       updateSelectionList();
       render();
@@ -328,9 +350,10 @@ export function createTileConstructor(config) {
     const screen = canvasPoint(event);
     const world = screenToWorldPoint(screen);
     const nextScale = clamp(state.view.scale * Math.exp(-event.deltaY * 0.0012), MIN_ZOOM, MAX_ZOOM);
+    const rotated = rotatePoint([world.x, world.y], state.view.rotation);
     state.view.scale = nextScale;
-    state.view.x = screen.x - world.x * nextScale;
-    state.view.y = screen.y - world.y * nextScale;
+    state.view.x = screen.x - rotated[0] * nextScale;
+    state.view.y = screen.y - rotated[1] * nextScale;
     updateSelectionList();
     render();
   }
@@ -350,6 +373,7 @@ export function createTileConstructor(config) {
     };
     state.pieces.push(piece);
     state.selectedPieceId = piece.id;
+    state.candidateCache.signature = "";
     updateSelectionList();
     render();
     config.setStatus(`painted ${pieceLabel(piece)} from edge ${candidate.edge + 1}`);
@@ -358,14 +382,20 @@ export function createTileConstructor(config) {
   function deletePiece(piece) {
     state.pieces = state.pieces.filter((item) => item.id !== piece.id);
     if (state.selectedPieceId === piece.id) state.selectedPieceId = state.pieces[0]?.id ?? null;
+    state.candidateCache.signature = "";
     updateSelectionList();
     render();
     config.setStatus(`deleted ${pieceLabel(piece)}`);
   }
 
   function buildCandidates() {
+    const signature = candidateCacheSignature();
+    if (state.candidateCache.signature === signature) return state.candidateCache.candidates;
     const candidates = [];
-    if (!state.pieces.length) return candidates;
+    if (!state.pieces.length) {
+      state.candidateCache = { signature, candidates };
+      return candidates;
+    }
     for (const piece of state.pieces) {
       for (let edge = 0; edge < 3; edge += 1) {
         const candidate = candidateForEdge(piece, edge);
@@ -375,16 +405,40 @@ export function createTileConstructor(config) {
         candidates.push(candidate);
       }
     }
+    state.candidateCache = { signature, candidates };
     return candidates;
   }
 
+  function candidateCacheSignature() {
+    return [
+      state.mirrorMode ? "m" : "r",
+      state.depth,
+      state.orientation?.lon,
+      state.orientation?.lat,
+      state.orientation?.roll,
+      state.gridSide,
+      ...state.pieces.map((piece) => [
+        piece.id,
+        addressKey(piece.address),
+        piece.mirrored ? 1 : 0,
+        round(piece.x),
+        round(piece.y),
+        round(piece.rotation),
+      ].join(",")),
+    ].join("|");
+  }
+
   function candidateForEdge(basePiece, edge) {
-    if (state.mirrorMode) {
+    return candidateOptionsForEdge(basePiece, edge, state.mirrorMode)[0] ?? null;
+  }
+
+  function candidateOptionsForEdge(basePiece, edge, mirrorMode = state.mirrorMode, ignoredPieceId = null) {
+    if (mirrorMode) {
       const address = cloneAddress(basePiece.address);
       const piece = createPiece(address, !basePiece.mirrored, 0, 0, 0, "candidate", basePiece.variant);
       alignAcrossEdge(piece, edge, transformedEdge(basePiece, edge), transformedTriangle(basePiece)[edge]);
-      const candidate = { piece, source: basePiece, edge, alignEdge: edge, mode: "self-reflection" };
-      return isCandidateConsistent(candidate) ? candidate : null;
+      const candidate = { piece, source: basePiece, edge, alignEdge: edge, mirrorMode, mode: "self-reflection" };
+      return isCandidateConsistent(candidate, ignoredPieceId) ? [candidate] : [];
     }
 
     // Outside mirror mode we consider two adjacency families:
@@ -409,58 +463,134 @@ export function createTileConstructor(config) {
         source: basePiece,
         edge,
         alignEdge,
+        mirrorMode,
         mode: needsMirror ? "mirror-adjacent" : "regular",
       };
     });
     candidates.sort((a, b) => angleDistance(a.piece.rotation, basePiece.rotation) - angleDistance(b.piece.rotation, basePiece.rotation));
-    return candidates.find(isCandidateConsistent) ?? null;
+    return candidates.filter((candidate) => isCandidateConsistent(candidate, ignoredPieceId));
+  }
+
+  function cyclePieceVariant(piece) {
+    const options = placementVariantsForCell(piece);
+    if (options.length <= 1) return false;
+    const current = pieceVariantSignature(piece);
+    const index = options.findIndex((candidate) => pieceVariantSignature(candidate.piece) === current);
+    const nextIndex = index < 0 ? 0 : (index + 1) % options.length;
+    const next = options[nextIndex].piece;
+    piece.address = cloneAddress(next.address);
+    piece.variant = next.variant ?? next.address.variant ?? 0;
+    piece.mirrored = next.mirrored;
+    piece.x = next.x;
+    piece.y = next.y;
+    piece.rotation = next.rotation;
+    state.selectedPieceId = piece.id;
+    state.mapCache.clear();
+    state.candidateCache.signature = "";
+    updateSelectionList();
+    render();
+    config.setStatus(`cycled ${piece.id} to ${pieceLabel(piece)} (${nextIndex + 1}/${options.length})`);
+    return true;
+  }
+
+  function placementVariantsForCell(piece) {
+    const options = [];
+    addPlacementOption(options, { piece: cloneVariantPiece(piece), source: piece, mode: "current" });
+    for (const source of state.pieces) {
+      if (source.id === piece.id) continue;
+      for (let edge = 0; edge < 3; edge += 1) {
+        for (const mirrorMode of [false, true]) {
+          for (const candidate of candidateOptionsForEdge(source, edge, mirrorMode, piece.id)) {
+            if (sameCell(candidate.piece, piece)) addPlacementOption(options, candidate);
+          }
+        }
+      }
+    }
+    options.sort((a, b) => pieceVariantSignature(a.piece).localeCompare(pieceVariantSignature(b.piece)));
+    return options;
+  }
+
+  function addPlacementOption(options, candidate) {
+    const signature = pieceVariantSignature(candidate.piece);
+    if (!options.some((item) => pieceVariantSignature(item.piece) === signature)) options.push(candidate);
+  }
+
+  function cloneVariantPiece(piece) {
+    return createPiece(piece.address, piece.mirrored, piece.x, piece.y, piece.rotation, "candidate", piece.variant);
+  }
+
+  function pieceVariantSignature(piece) {
+    return `${addressKey(piece.address)}:${piece.mirrored ? "L" : "R"}`;
   }
 
   function effectiveChirality(piece) {
     return isoChirality(piece.address.face, piece.variant ?? piece.address.variant ?? 0) * (piece.mirrored ? -1 : 1);
   }
 
-  function isCandidateConsistent(candidate) {
+  function isCandidateConsistent(candidate, ignoredPieceId = null) {
     // For each edge of the candidate, if a placed piece is geometrically adjacent on
     // that edge, the relationship between them must be one of the three permitted
     // adjacencies (regular, self-reflection, or mirror-adjacent). Otherwise placing
     // the candidate would produce a seam mismatch with the existing tile.
     const piece = candidate.piece;
     for (let edge = 0; edge < 3; edge += 1) {
-      const adjacent = adjacentPlacedPiece(piece, edge);
+      const adjacent = adjacentPlacedEdge(piece, edge, ignoredPieceId);
       if (!adjacent) continue;
-      if (adjacent.id === candidate.source?.id && edge === candidate.alignEdge) continue;
       const expected = neighborTriangleAddress(
         piece.address,
         edge,
         piece.address.depth,
         state.orientation,
-        adjacent.address.variant ?? adjacent.variant ?? 0,
+        adjacent.piece.address.variant ?? adjacent.piece.variant ?? 0,
       );
-      const isGeometricNeighbour = addressKey(expected) === addressKey(adjacent.address);
-      const isSelfReflection = addressKey(piece.address) === addressKey(adjacent.address)
-        && Boolean(piece.mirrored) !== Boolean(adjacent.mirrored);
+      const back = neighborTriangleAddress(
+        adjacent.piece.address,
+        adjacent.edge,
+        adjacent.piece.address.depth,
+        state.orientation,
+        piece.address.variant ?? piece.variant ?? 0,
+      );
+      const isGeometricNeighbour = addressKey(expected) === addressKey(adjacent.piece.address)
+        && addressKey(back) === addressKey(piece.address);
+      const isSelfReflection = addressKey(piece.address) === addressKey(adjacent.piece.address)
+        && Boolean(piece.mirrored) !== Boolean(adjacent.piece.mirrored);
       // For a regular or mirror-adjacent seam to be continuous, the candidate and
       // its placed neighbour must produce the same effective chirality.
-      const chiralitiesMatch = effectiveChirality(piece) === effectiveChirality(adjacent);
+      const chiralitiesMatch = effectiveChirality(piece) === effectiveChirality(adjacent.piece);
       const matchesRegularFamily = isGeometricNeighbour && chiralitiesMatch;
       if (!matchesRegularFamily && !isSelfReflection) return false;
     }
     return true;
   }
 
-  function adjacentPlacedPiece(piece, edge) {
-    const verts = transformedTriangle(piece);
-    const center = centroid(verts);
-    const a = verts[(edge + 1) % 3];
-    const b = verts[(edge + 2) % 3];
-    const mid = midpoint(a, b);
-    const target = [2 * mid[0] - center[0], 2 * mid[1] - center[1]];
-    const threshold = Math.max(1, state.gridSide * 0.25);
-    return state.pieces.find((other) => {
-      const pc = centroid(transformedTriangle(other));
-      return Math.hypot(pc[0] - target[0], pc[1] - target[1]) < threshold;
-    }) ?? null;
+  function adjacentPlacedPiece(piece, edge, ignoredPieceId = null) {
+    return adjacentPlacedEdge(piece, edge, ignoredPieceId)?.piece ?? null;
+  }
+
+  function adjacentPlacedEdge(piece, edge, ignoredPieceId = null) {
+    const target = transformedEdge(piece, edge);
+    const threshold = edgeMatchTolerance();
+    for (const other of state.pieces) {
+      if (other.id === ignoredPieceId || other.id === piece.id) continue;
+      for (let otherEdge = 0; otherEdge < 3; otherEdge += 1) {
+        if (edgesCoincide(target, transformedEdge(other, otherEdge), threshold)) {
+          return { piece: other, edge: otherEdge };
+        }
+      }
+    }
+    return null;
+  }
+
+  function edgeMatchTolerance() {
+    return Math.max(0.5, state.gridSide * 0.035);
+  }
+
+  function edgesCoincide(a, b, threshold) {
+    const direct = Math.hypot(a[0][0] - b[0][0], a[0][1] - b[0][1])
+      + Math.hypot(a[1][0] - b[1][0], a[1][1] - b[1][1]);
+    const reversed = Math.hypot(a[0][0] - b[1][0], a[0][1] - b[1][1])
+      + Math.hypot(a[1][0] - b[0][0], a[1][1] - b[0][1]);
+    return Math.min(direct, reversed) <= threshold * 2;
   }
 
   function alignAcrossEdge(piece, alignEdge, targetEdge, baseOpposite) {
@@ -501,6 +631,8 @@ export function createTileConstructor(config) {
     });
     state.nextId = state.pieces.length + 1;
     state.selectedPieceId = state.pieces[0]?.id ?? null;
+    state.mapCache.clear();
+    state.candidateCache.signature = "";
     updateSelectionList();
     render();
   }
@@ -522,7 +654,12 @@ export function createTileConstructor(config) {
   }
 
   function renderConstructedSvg(polygons, options) {
-    const bounds = boundsForPieces(state.pieces);
+    const frontBounds = boundsForPieces(state.pieces);
+    const frontHeight = Math.max(1, frontBounds.maxY - frontBounds.minY);
+    const backsideOffset = options.backside?.enabled ? frontHeight + state.unitScale * 0.42 : 0;
+    const bounds = options.backside?.enabled
+      ? { ...frontBounds, maxY: frontBounds.maxY + backsideOffset }
+      : frontBounds;
     const padding = 8;
     const targetSize = options.type === "png"
       ? Number(options.pngResolution) || 1024
@@ -548,6 +685,20 @@ export function createTileConstructor(config) {
       }, geometry).replaceAll('id="', `id="piece${index + 1}-`);
       return `<g data-piece="${piece.id}" data-address="${escapeAttr(addressVariantKey(piece.address))}" data-variant="${piece.variant}" data-mirrored="${piece.mirrored ? "1" : "0"}">${fragment}</g>`;
     });
+    if (options.backside?.enabled) {
+      parts.push(...state.pieces.map((piece, index) => {
+        const geometry = {
+          trianglePath: transformedTriangle(piece).map((point) => projectScreen([point[0], point[1] + backsideOffset])),
+          project: (u, v) => {
+            const point = screenPointForUV(piece, u, v);
+            return projectScreen([point[0], point[1] + backsideOffset]);
+          },
+        };
+        const label = tileBacksideLabel(piece.address, piece.mirrored);
+        const fragment = renderBacksideSvgFragment(geometry, label, index + 1, options).replaceAll('id="', `id="piece${index + 1}-`);
+        return `<g data-piece="${piece.id}" data-address="${escapeAttr(addressVariantKey(piece.address))}" data-backside="1" data-global-number="${index + 1}">${fragment}</g>`;
+      }));
+    }
     return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="${SVG_NS}" width="${round(targetSize)}" height="${round(targetSize)}" viewBox="0 0 ${round(targetSize)} ${round(targetSize)}">
 ${parts.join("\n")}
@@ -621,47 +772,78 @@ ${parts.join("\n")}
   }
 
   function drawCachedPieceMap(ctx, piece) {
+    const rasterScale = pieceRasterScale();
     const cacheKey = [
       addressKey(piece.address),
       piece.variant,
       piece.mirrored ? "m" : "o",
       round(piece.rotation),
+      rasterScale,
       state.cacheSignature,
     ].join(":");
     let cached = state.mapCache.get(cacheKey);
     if (!cached) {
-      cached = renderPieceMap(piece);
+      cached = renderPieceMap(piece, rasterScale);
       state.mapCache.set(cacheKey, cached);
+      trimMapCache();
     }
-    ctx.drawImage(cached.canvas, piece.x + cached.bounds.minX, piece.y + cached.bounds.minY);
+    ctx.drawImage(
+      cached.canvas,
+      piece.x + cached.bounds.minX,
+      piece.y + cached.bounds.minY,
+      cached.width,
+      cached.height,
+    );
   }
 
-  function renderPieceMap(piece) {
+  function pieceRasterScale() {
+    const target = (state.size.ratio || 1) * state.view.scale * 1.35;
+    if (target <= 1.25) return 1;
+    if (target <= 1.75) return 1.5;
+    if (target <= 2.5) return 2;
+    if (target <= 3.5) return 3;
+    return 4;
+  }
+
+  function trimMapCache() {
+    while (state.mapCache.size > MAX_MAP_CACHE_ITEMS) {
+      const oldest = state.mapCache.keys().next().value;
+      state.mapCache.delete(oldest);
+    }
+  }
+
+  function renderPieceMap(piece, rasterScale = 1) {
     const angle = piece.rotation;
     const rotatedVertices = localTriangle(piece).map((point) => rotatePoint(point, angle));
     const bounds = boundsForPoints(rotatedVertices);
     const padding = Math.max(3, state.style.coastWidth + 2);
-    const width = Math.max(1, Math.ceil(bounds.maxX - bounds.minX + padding * 2));
-    const height = Math.max(1, Math.ceil(bounds.maxY - bounds.minY + padding * 2));
+    const widthWorld = Math.max(1, bounds.maxX - bounds.minX + padding * 2);
+    const heightWorld = Math.max(1, bounds.maxY - bounds.minY + padding * 2);
+    const width = Math.max(1, Math.ceil(widthWorld * rasterScale));
+    const height = Math.max(1, Math.ceil(heightWorld * rasterScale));
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const localCtx = canvas.getContext("2d");
     const toCachePoint = (point) => [
-      point[0] - bounds.minX + padding,
-      point[1] - bounds.minY + padding,
+      (point[0] - bounds.minX + padding) * rasterScale,
+      (point[1] - bounds.minY + padding) * rasterScale,
     ];
     const trianglePath = rotatedVertices.map(toCachePoint);
     pathPolygon(localCtx, trianglePath);
     localCtx.fillStyle = state.style.ocean;
     localCtx.fill();
+    const scaledStyle = {
+      ...state.style,
+      coastWidth: state.style.coastWidth * rasterScale,
+    };
     drawLandOnTriangle(
       localCtx,
       piece.address,
       trianglePath,
       (u, v) => toCachePoint(rotatePoint(localPointForUV(piece, u, v), angle)),
       state.polygons,
-      state.style,
+      scaledStyle,
       state.orientation,
       true,
     );
@@ -671,6 +853,8 @@ ${parts.join("\n")}
         minX: bounds.minX - padding,
         minY: bounds.minY - padding,
       },
+      width: widthWorld,
+      height: heightWorld,
     };
   }
 
@@ -895,10 +1079,12 @@ ${parts.join("\n")}
   }
 
   function screenToWorldPoint(point) {
-    return {
+    const scaled = {
       x: (point.x - state.view.x) / state.view.scale,
       y: (point.y - state.view.y) / state.view.scale,
     };
+    const rotated = rotatePoint([scaled.x, scaled.y], -state.view.rotation);
+    return { x: rotated[0], y: rotated[1] };
   }
 
   function visibleWorldBounds() {
@@ -928,6 +1114,15 @@ ${parts.join("\n")}
     const ca = pieceCenter(a);
     const cb = pieceCenter(b);
     return Math.hypot(ca[0] - cb[0], ca[1] - cb[1]) < Math.max(1, state.gridSide * 0.2);
+  }
+
+  function isPieceVisible(piece) {
+    const bounds = boundsForPoints(transformedTriangle(piece));
+    const margin = state.unitScale * 0.15;
+    return bounds.maxX >= state.visibleBounds.minX - margin
+      && bounds.minX <= state.visibleBounds.maxX + margin
+      && bounds.maxY >= state.visibleBounds.minY - margin
+      && bounds.minY <= state.visibleBounds.maxY + margin;
   }
 
   function pieceCenter(piece) {

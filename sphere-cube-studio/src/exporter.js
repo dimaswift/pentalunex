@@ -26,12 +26,13 @@ const encoder = new TextEncoder();
 export function createTriangleManifest(addresses, options) {
   const triangles = [];
   const adjacency = {};
+  let ordinal = 1;
   for (const address of addresses) {
-    const item = manifestTriangle(address, false, options);
+    const item = manifestTriangle(address, false, options, ordinal++);
     triangles.push(item);
     adjacency[item.id] = adjacencyForAddress(address, false, options.orientation ?? address.orientation);
     if (options.mirror) {
-      const mirrored = manifestTriangle(address, true, options);
+      const mirrored = manifestTriangle(address, true, options, ordinal++);
       triangles.push(mirrored);
       adjacency[mirrored.id] = adjacencyForAddress(address, true, options.orientation ?? address.orientation);
     }
@@ -50,6 +51,7 @@ export function createTriangleManifest(addresses, options) {
       svgScale: options.svgScale,
       pngResolution: options.pngResolution,
       border: options.border,
+      backside: options.backside,
       graticule: options.graticule,
       style: options.style,
     },
@@ -78,6 +80,15 @@ export function triangleFileBase(address, mirrored = false) {
   return `face_${address.face}_v${variant}/f${address.face}_v${variant}_r${address.root}_d${address.depth}_${path}${mirrored ? "_mirror" : ""}`;
 }
 
+export function tileDisplayKey(address) {
+  const path = address.path?.length ? address.path.join("") : "root";
+  return `${address.face}.${address.variant ?? 0}:${address.root}:${path}`;
+}
+
+export function tileBacksideLabel(address, mirrored = false) {
+  return `${mirrored ? "L" : "R"}:${tileDisplayKey(address)}`;
+}
+
 export function renderTriangleSvg(address, polygons, options = {}) {
   const width = Number(options.svgScale) || 512;
   const height = width;
@@ -102,6 +113,55 @@ return `<?xml version="1.0" encoding="UTF-8"?>
 <svg ${attrs}>
 ${content}
 </svg>
+`;
+}
+
+export function renderBacksideSvg(address, options = {}, ordinal = 1) {
+  const width = Number(options.svgScale) || 512;
+  const height = width;
+  const mirrored = !!options.mirrored;
+  const orientation = options.orientation ?? address.orientation;
+  const geometry = triangleGeometry(address, width, height, mirrored, orientation);
+  const content = renderBacksideSvgFragment(geometry, tileBacksideLabel(address, mirrored), ordinal, options);
+  const attrs = [
+    `xmlns="${SVG_NS}"`,
+    `width="${round(width)}"`,
+    `height="${round(height)}"`,
+    `viewBox="0 0 ${round(width)} ${round(height)}"`,
+    `data-face="${address.face}"`,
+    `data-variant="${address.variant ?? 0}"`,
+    `data-root="${address.root}"`,
+    `data-depth="${address.depth}"`,
+    `data-path="${address.path.join("")}"`,
+    `data-mirrored="${String(mirrored)}"`,
+    `data-backside="true"`,
+    `data-global-number="${ordinal}"`,
+  ].join(" ");
+
+return `<?xml version="1.0" encoding="UTF-8"?>
+<svg ${attrs}>
+${content}
+</svg>
+`;
+}
+
+export function renderBacksideSvgFragment(geometry, label, ordinal, options = {}) {
+  const trianglePath = pathFromPoints(geometry.trianglePath);
+  const center = centroid2(geometry.trianglePath);
+  const bounds = boundsForPoints(geometry.trianglePath);
+  const size = Math.max(1, Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY));
+  const color = options.backside?.color ?? options.style?.coast ?? "#111111";
+  const strokeWidth = options.backside?.strokeWidth ?? Math.max(0.6, size * 0.003);
+  const numberSize = Math.max(8, size * 0.105);
+  const labelSize = Math.max(6, size * 0.052);
+  const numberText = `#${ordinal}`;
+
+return `
+  <g id="backside" data-label="${escapeAttr(label)}" data-global-number="${ordinal}">
+    <path d="${trianglePath}" fill="none" stroke="${escapeAttr(color)}" stroke-width="${round(strokeWidth)}" stroke-linejoin="round"/>
+    <text x="${round(center[0])}" y="${round(center[1] - labelSize * 0.58)}" fill="${escapeAttr(color)}" font-family="monospace" font-size="${round(numberSize)}" font-weight="700" text-anchor="middle" dominant-baseline="middle">${escapeText(numberText)}</text>
+    <text x="${round(center[0])}" y="${round(center[1] + labelSize * 1.05)}" fill="${escapeAttr(color)}" font-family="monospace" font-size="${round(labelSize)}" font-weight="700" text-anchor="middle" dominant-baseline="middle">${escapeText(label)}</text>
+  </g>
 `;
 }
 
@@ -155,16 +215,25 @@ export async function renderTrianglePng(address, polygons, options = {}) {
   return svgToPngBytes(svg, resolution, resolution);
 }
 
+export async function renderBacksidePng(address, options = {}, ordinal = 1) {
+  const resolution = Number(options.pngResolution) || 512;
+  const svg = renderBacksideSvg(address, {
+    ...options,
+    svgScale: resolution,
+  }, ordinal);
+  return svgToPngBytes(svg, resolution, resolution);
+}
+
 export async function exportSelectedTriangle(address, polygons, options) {
-  if (options.mirror) {
+  if (options.mirror || options.backside?.enabled) {
     const files = [{
       name: "manifest.json",
       data: encoder.encode(JSON.stringify(createTriangleManifest([address], options), null, 2)),
     }];
-    await addTriangleFile(files, address, false, polygons, options);
-    await addTriangleFile(files, address, true, polygons, options);
+    await addTriangleFile(files, address, false, polygons, options, 1);
+    if (options.mirror) await addTriangleFile(files, address, true, polygons, options, 2);
     return {
-      filename: `${triangleFileBase(address, false)}_with_mirror.zip`.replaceAll("/", "_"),
+      filename: `${triangleFileBase(address, false)}${options.mirror ? "_with_mirror" : ""}${options.backside?.enabled ? "_with_backside" : ""}.zip`.replaceAll("/", "_"),
       blob: buildZip(files),
     };
   }
@@ -187,24 +256,25 @@ export async function exportAllTriangles(polygons, options, onProgress = () => {
   });
 
   let completed = 0;
-  const total = addresses.length * (options.mirror ? 2 : 1);
+  let ordinal = 1;
+  const tileTotal = addresses.length * (options.mirror ? 2 : 1);
+  const total = tileTotal * (options.backside?.enabled ? 2 : 1);
   for (const address of addresses) {
-    await addTriangleFile(files, address, false, polygons, options);
-    completed += 1;
+    completed += await addTriangleFile(files, address, false, polygons, options, ordinal++);
     onProgress(completed, total);
     if (completed % 12 === 0) await yieldFrame();
     if (options.mirror) {
-      await addTriangleFile(files, address, true, polygons, options);
-      completed += 1;
+      completed += await addTriangleFile(files, address, true, polygons, options, ordinal++);
       onProgress(completed, total);
       if (completed % 12 === 0) await yieldFrame();
     }
   }
 
   return {
-    filename: `sphere-cube-triangles-d${options.depth}-${options.type}${options.mirror ? "-mirror" : ""}.zip`,
+    filename: `sphere-cube-triangles-d${options.depth}-${options.type}${options.mirror ? "-mirror" : ""}${options.backside?.enabled ? "-backside" : ""}.zip`,
     blob: buildZip(files),
-    count: total,
+    count: tileTotal,
+    fileCount: total,
   };
 }
 
@@ -236,7 +306,7 @@ function collectAddresses(face, variant, root, path, targetDepth, out, orientati
   }
 }
 
-async function addTriangleFile(files, address, mirrored, polygons, options) {
+async function addTriangleFile(files, address, mirrored, polygons, options, ordinal = 1) {
   const base = triangleFileBase(address, mirrored);
   if (options.type === "png") {
     files.push({
@@ -249,15 +319,34 @@ async function addTriangleFile(files, address, mirrored, polygons, options) {
       data: encoder.encode(renderTriangleSvg(address, polygons, { ...options, mirrored })),
     });
   }
+  if (options.backside?.enabled) {
+    if (options.type === "png") {
+      files.push({
+        name: `${base}_backside.png`,
+        data: await renderBacksidePng(address, { ...options, mirrored }, ordinal),
+      });
+    } else {
+      files.push({
+        name: `${base}_backside.svg`,
+        data: encoder.encode(renderBacksideSvg(address, { ...options, mirrored }, ordinal)),
+      });
+    }
+    return 2;
+  }
+  return 1;
 }
 
-function manifestTriangle(address, mirrored, options) {
+function manifestTriangle(address, mirrored, options, ordinal = 1) {
   const orientation = options.orientation ?? address.orientation;
   const vertices = triangleVerticesFromAddress(address, orientation);
   const id = triangleId(address, mirrored);
+  const base = triangleFileBase(address, mirrored);
   return {
     id,
-    file: `${triangleFileBase(address, mirrored)}.${options.type}`,
+    globalNumber: ordinal,
+    file: `${base}.${options.type}`,
+    backsideFile: options.backside?.enabled ? `${base}_backside.${options.type}` : null,
+    backsideLabel: tileBacksideLabel(address, mirrored),
     mirrored,
     chirality: mirrored ? "mirror" : "original",
     reflectionOf: mirrored ? triangleId(address, false) : null,
@@ -464,6 +553,13 @@ function boundsForPoints(points) {
   }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
 }
 
+function centroid2(points) {
+  return [
+    points.reduce((sum, point) => sum + point[0], 0) / points.length,
+    points.reduce((sum, point) => sum + point[1], 0) / points.length,
+  ];
+}
+
 function pathFromPoints(points) {
   return points.map((point, index) => `${index === 0 ? "M" : "L"} ${round(point[0])} ${round(point[1])}`).join(" ") + " Z";
 }
@@ -582,6 +678,13 @@ function escapeAttr(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function escapeText(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }
