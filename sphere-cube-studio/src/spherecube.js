@@ -362,13 +362,19 @@ export function poleCornerForFace(face, orientation = SPHERE_ORIENTATION) {
   };
 }
 
-export function splitSchemeForFace(face, orientation = SPHERE_ORIENTATION) {
-  const corner = poleCornerForFace(face, orientation);
-  return corner.u === corner.v ? "main" : "anti";
+function variantScheme(scheme, variant) {
+  if (((Number(variant) % 2) + 2) % 2 !== 1) return scheme;
+  return scheme === "main" ? "anti" : "main";
 }
 
-export function splitDiagonalForFace(face, orientation = SPHERE_ORIENTATION) {
-  return splitSchemeForFace(face, orientation) === "main"
+export function splitSchemeForFace(face, orientation = SPHERE_ORIENTATION, variant = 0) {
+  const corner = poleCornerForFace(face, orientation);
+  const base = corner.u === corner.v ? "main" : "anti";
+  return variantScheme(base, variant);
+}
+
+export function splitDiagonalForFace(face, orientation = SPHERE_ORIENTATION, variant = 0) {
+  return splitSchemeForFace(face, orientation, variant) === "main"
     ? [[0, 0], [1, 1]]
     : [[0, 1], [1, 0]];
 }
@@ -389,18 +395,18 @@ export function poleAlignedUVToFaceUV(face, u, v, orientation = SPHERE_ORIENTATI
   };
 }
 
-export function rootTriangleForUV(face, u, v, orientation = SPHERE_ORIENTATION) {
-  return splitSchemeForFace(face, orientation) === "main"
+export function rootTriangleForUV(face, u, v, orientation = SPHERE_ORIENTATION, variant = 0) {
+  return splitSchemeForFace(face, orientation, variant) === "main"
     ? (u <= v ? 0 : 1)
     : (u + v <= 1 ? 0 : 1);
 }
 
-export function rootTriangleVertices(face, root, orientation = SPHERE_ORIENTATION) {
-  return ROOT_TRIANGLE_SCHEMES[splitSchemeForFace(face, orientation)][root].vertices.map((point) => point.slice());
+export function rootTriangleVertices(face, root, orientation = SPHERE_ORIENTATION, variant = 0) {
+  return ROOT_TRIANGLE_SCHEMES[splitSchemeForFace(face, orientation, variant)][root].vertices.map((point) => point.slice());
 }
 
-export function rootTriangleName(face, root, orientation = SPHERE_ORIENTATION) {
-  return ROOT_TRIANGLE_SCHEMES[splitSchemeForFace(face, orientation)][root]?.name ?? "unknown";
+export function rootTriangleName(face, root, orientation = SPHERE_ORIENTATION, variant = 0) {
+  return ROOT_TRIANGLE_SCHEMES[splitSchemeForFace(face, orientation, variant)][root]?.name ?? "unknown";
 }
 
 export function barycentricForTriangle(point, vertices) {
@@ -481,20 +487,21 @@ export function descendBarycentric(barycentric, child) {
 }
 
 export function triangleVerticesFromAddress(address, orientation = address.orientation ?? SPHERE_ORIENTATION) {
-  let vertices = rootTriangleVertices(address.face, address.root, orientation);
+  const variant = address.variant ?? 0;
+  let vertices = rootTriangleVertices(address.face, address.root, orientation, variant);
   for (const child of address.path ?? []) {
     vertices = childTriangleVertices(vertices, child);
   }
   return vertices;
 }
 
-export function uvToTriAddress(face, u, v, depth = 0, orientation = SPHERE_ORIENTATION) {
+export function uvToTriAddress(face, u, v, depth = 0, orientation = SPHERE_ORIENTATION, variant = 0) {
   if (!Number.isInteger(depth) || depth < 0) {
     throw new Error(`Subdivision depth must be a non-negative integer, got ${depth}`);
   }
-  const root = rootTriangleForUV(face, u, v, orientation);
+  const root = rootTriangleForUV(face, u, v, orientation, variant);
   const path = [];
-  let vertices = rootTriangleVertices(face, root, orientation);
+  let vertices = rootTriangleVertices(face, root, orientation, variant);
   let barycentric = barycentricForTriangle([u, v], vertices);
 
   for (let level = 0; level < depth; level += 1) {
@@ -506,8 +513,9 @@ export function uvToTriAddress(face, u, v, depth = 0, orientation = SPHERE_ORIEN
 
   return {
     face,
+    variant,
     root,
-    rootName: rootTriangleName(face, root, orientation),
+    rootName: rootTriangleName(face, root, orientation, variant),
     depth,
     path,
     pathBits: packPath(path).toString(),
@@ -522,9 +530,9 @@ export function triAddressToUV(address, orientation = address.orientation ?? SPH
   return pointFromBarycentric(address.barycentric, vertices);
 }
 
-export function lonLatToTriAddress(lon, lat, depth = 0, orientation = SPHERE_ORIENTATION) {
+export function lonLatToTriAddress(lon, lat, depth = 0, orientation = SPHERE_ORIENTATION, variant = 0) {
   const projected = lonLatToFaceUV(lon, lat, null, orientation);
-  const address = uvToTriAddress(projected.face, projected.u, projected.v, depth, orientation);
+  const address = uvToTriAddress(projected.face, projected.u, projected.v, depth, orientation, variant);
   return {
     ...address,
     lon,
@@ -560,10 +568,16 @@ export function unpackPath(packed, depth) {
 }
 
 export function addressKey(address) {
-  return `${address.face}:${address.root}:${(address.path ?? []).join("")}`;
+  return `${address.face}:${address.variant ?? 0}:${address.root}:${(address.path ?? []).join("")}`;
 }
 
-export function neighborTriangleAddress(address, edgeIndex, depth = address.depth, orientation = address.orientation ?? SPHERE_ORIENTATION) {
+export function neighborTriangleAddress(
+  address,
+  edgeIndex,
+  depth = address.depth,
+  orientation = address.orientation ?? SPHERE_ORIENTATION,
+  targetVariant = address.variant ?? 0,
+) {
   if (!Number.isInteger(edgeIndex) || edgeIndex < 0 || edgeIndex > 2) {
     throw new Error(`Triangle edge index must be 0..2, got ${edgeIndex}`);
   }
@@ -580,7 +594,7 @@ export function neighborTriangleAddress(address, edgeIndex, depth = address.dept
   const vector = faceUVToVector(address.face, probeU, probeV);
   const face = owningFaceForVector(vector);
   const { u, v } = vectorToFaceUV(face, vector);
-  return uvToTriAddress(face, clamp(u, 0, 1), clamp(v, 0, 1), depth, orientation);
+  return uvToTriAddress(face, clamp(u, 0, 1), clamp(v, 0, 1), depth, orientation, targetVariant);
 }
 
 export function cubeFacePoint(face, u, v) {
@@ -588,13 +602,16 @@ export function cubeFacePoint(face, u, v) {
   return fromFaceXYZ(face, [x, y, 1]);
 }
 
+// Variant 1's viewing corner is the 90-degree neighbor of variant 0 on the same
+// face (sharing one cube edge). The diagonally-opposite corner would give the
+// same rhombus 180-rotated, so all 12 atlas tiles must avoid that pairing.
 const ISO_FACE_CORNERS = [
-  [[-1, 1, 1], [1, -1, 1]],
-  [[1, -1, 1], [1, 1, -1]],
-  [[-1, 1, -1], [1, 1, 1]],
-  [[-1, -1, 1], [-1, 1, -1]],
-  [[-1, -1, -1], [1, -1, 1]],
-  [[-1, 1, -1], [1, -1, -1]],
+  [[-1, 1, 1], [-1, -1, 1]],
+  [[1, -1, 1], [1, -1, -1]],
+  [[-1, 1, -1], [-1, 1, 1]],
+  [[-1, -1, 1], [-1, 1, 1]],
+  [[-1, -1, -1], [1, -1, -1]],
+  [[-1, 1, -1], [1, 1, -1]],
 ];
 
 export function isoCornerForFaceOrientation(face, orientation = 0) {
@@ -658,7 +675,12 @@ export function topologyManifest(orientation = SPHERE_ORIENTATION) {
     })),
     faceEdgeAdjacency: FACE_EDGE_ADJACENCY,
     poleCorners: FACE_NAMES.map((_, face) => ({ face, ...poleCornerForFace(face, orientation) })),
-    splitDiagonals: FACE_NAMES.map((_, face) => ({ face, scheme: splitSchemeForFace(face, orientation), diagonal: splitDiagonalForFace(face, orientation) })),
+    splitDiagonals: FACE_NAMES.flatMap((_, face) => [0, 1].map((variant) => ({
+      face,
+      variant,
+      scheme: splitSchemeForFace(face, orientation, variant),
+      diagonal: splitDiagonalForFace(face, orientation, variant),
+    }))),
     rootTriangleSchemes: ROOT_TRIANGLE_SCHEMES,
   };
 }

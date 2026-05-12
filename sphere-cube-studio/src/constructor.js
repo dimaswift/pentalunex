@@ -326,10 +326,11 @@ export function createTileConstructor(config) {
       return { piece, source: basePiece, edge, alignEdge: edge, mirrorMode: true };
     }
 
-    const neighbor = neighborTriangleAddress(basePiece.address, edge, basePiece.address.depth, state.orientation);
-    const variants = neighbor.face === basePiece.address.face ? [basePiece.variant] : [0, 1];
+    const probeNeighbor = neighborTriangleAddress(basePiece.address, edge, basePiece.address.depth, state.orientation);
+    const variants = probeNeighbor.face === basePiece.address.face ? [basePiece.variant] : [0, 1];
     const candidates = variants.map((variant) => {
-      const address = { ...neighbor, variant };
+      // Resolve the neighbor triangle in the target variant's split scheme.
+      const address = neighborTriangleAddress(basePiece.address, edge, basePiece.address.depth, state.orientation, variant);
       const alignEdge = backEdgeFor(address, basePiece.address);
       const piece = createPiece(address, basePiece.mirrored, 0, 0, 0, "candidate", variant);
       alignAcrossEdge(piece, alignEdge, transformedEdge(basePiece, edge), transformedTriangle(basePiece)[edge]);
@@ -670,13 +671,13 @@ ${parts.join("\n")}
   function addressFromNode(face, variant, root, path, orientation) {
     const vertices = path.reduce(
       (current, child) => childTriangleVertices(current, child),
-      rootTriangleVertices(face, root, orientation),
+      rootTriangleVertices(face, root, orientation, variant),
     );
     const uv = centroid(vertices);
     return {
-      ...uvToTriAddress(face, uv[0], uv[1], path.length, orientation),
+      ...uvToTriAddress(face, uv[0], uv[1], path.length, orientation, variant),
       root,
-      rootName: rootTriangleName(face, root, orientation),
+      rootName: rootTriangleName(face, root, orientation, variant),
       path: path.slice(),
       depth: path.length,
       pathBits: packPath(path).toString(),
@@ -764,7 +765,7 @@ ${parts.join("\n")}
 
   function backEdgeFor(address, targetAddress) {
     for (let edge = 0; edge < 3; edge += 1) {
-      const neighbor = neighborTriangleAddress(address, edge, address.depth, state.orientation);
+      const neighbor = neighborTriangleAddress(address, edge, address.depth, state.orientation, targetAddress.variant ?? 0);
       if (addressKey(neighbor) === addressKey(targetAddress)) return edge;
     }
     return 0;

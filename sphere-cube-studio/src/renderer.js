@@ -284,7 +284,7 @@ function drawLonLatLine(ctx, tile, points, stroke, width = 0.85) {
 
 function drawSubdivision(ctx, tile, depth) {
   const triangles = [];
-  for (let root = 0; root < 2; root += 1) collectTriangles(rootTriangleVertices(tile.face, root, tile.orientationState), depth, triangles);
+  for (let root = 0; root < 2; root += 1) collectTriangles(rootTriangleVertices(tile.face, root, tile.orientationState, tile.orientation), depth, triangles);
 
   ctx.save();
   ctx.strokeStyle = "rgba(243,239,230,0.13)";
@@ -302,7 +302,7 @@ function drawSubdivision(ctx, tile, depth) {
 
   ctx.strokeStyle = "rgba(240,179,90,0.36)";
   ctx.lineWidth = 1;
-  const [start, end] = splitDiagonalForFace(tile.face, tile.orientationState);
+  const [start, end] = splitDiagonalForFace(tile.face, tile.orientationState, tile.orientation);
   const a = uvToScreen(tile, start[0], start[1]);
   const b = uvToScreen(tile, end[0], end[1]);
   ctx.beginPath();

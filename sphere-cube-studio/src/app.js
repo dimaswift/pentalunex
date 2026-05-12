@@ -162,10 +162,7 @@ function syncFromControls() {
   state.export.graticule.enabled = controls.exportGraticule.checked;
   state.export.graticule.color = controls.exportGraticuleColor.value;
   state.export.graticule.width = Number(controls.exportGraticuleWidth.value);
-  state.selectedAddress = {
-    ...lonLatToTriAddress(state.lon, state.lat, state.depth, state.orientation),
-    variant: state.selectedVariant,
-  };
+  state.selectedAddress = lonLatToTriAddress(state.lon, state.lat, state.depth, state.orientation, state.selectedVariant);
 
   outputs.lon.value = state.lon.toFixed(2);
   outputs.lat.value = state.lat.toFixed(2);
@@ -283,7 +280,7 @@ function updateHover(event) {
     return;
   }
   const lonLat = lonLatForHit(hit, state.orientation);
-  const address = lonLatToTriAddress(lonLat.lon, lonLat.lat, state.depth, state.orientation);
+  const address = lonLatToTriAddress(lonLat.lon, lonLat.lat, state.depth, state.orientation, hit.variant);
   state.hoverAddress = {
     ...address,
     lon: lonLat.lon,

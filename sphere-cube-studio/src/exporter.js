@@ -212,17 +212,17 @@ function collectAddresses(face, variant, root, path, targetDepth, out, orientati
   if (path.length === targetDepth) {
     const vertices = path.reduce(
       (current, child) => childTriangleVertices(current, child),
-      rootTriangleVertices(face, root, orientation),
+      rootTriangleVertices(face, root, orientation, variant),
     );
     const centroid = [
       (vertices[0][0] + vertices[1][0] + vertices[2][0]) / 3,
       (vertices[0][1] + vertices[1][1] + vertices[2][1]) / 3,
     ];
     out.push({
-      ...uvToTriAddress(face, centroid[0], centroid[1], targetDepth, orientation),
+      ...uvToTriAddress(face, centroid[0], centroid[1], targetDepth, orientation, variant),
       path: path.slice(),
       root,
-      rootName: rootTriangleName(face, root, orientation),
+      rootName: rootTriangleName(face, root, orientation, variant),
       depth: targetDepth,
       pathBits: packPath(path).toString(),
       barycentric: [1 / 3, 1 / 3, 1 / 3],
@@ -274,21 +274,22 @@ function manifestTriangle(address, mirrored, options) {
     uv: address.uv,
     vertices,
     poleAlignedVertices: vertices.map(([u, v]) => faceUVToPoleAlignedUV(address.face, u, v, orientation)),
-    splitDiagonal: splitDiagonalForFace(address.face, orientation),
+    splitDiagonal: splitDiagonalForFace(address.face, orientation, address.variant ?? 0),
   };
 }
 
 function adjacencyForAddress(address, mirrored, orientation) {
   const sameChirality = [0, 1, 2].map((edge) => {
-    const neighbor = neighborTriangleAddress(address, edge, address.depth, orientation);
-    const variants = neighbor.face === address.face ? [address.variant ?? 0] : [0, 1];
+    const probe = neighborTriangleAddress(address, edge, address.depth, orientation, address.variant ?? 0);
+    const variants = probe.face === address.face ? [address.variant ?? 0] : [0, 1];
+    const resolved = variants.map((variant) => neighborTriangleAddress(address, edge, address.depth, orientation, variant));
     return {
       edge,
-      to: triangleId({ ...neighbor, variant: variants[0] }, mirrored),
-      variants: variants.map((variant) => triangleId({ ...neighbor, variant }, mirrored)),
-      face: neighbor.face,
-      root: neighbor.root,
-      path: neighbor.path,
+      to: triangleId(resolved[0], mirrored),
+      variants: resolved.map((addr) => triangleId(addr, mirrored)),
+      face: probe.face,
+      root: probe.root,
+      path: probe.path,
       chirality: mirrored ? "mirror" : "original",
     };
   });
