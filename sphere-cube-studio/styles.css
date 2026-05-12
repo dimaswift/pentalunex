@@ -411,6 +411,41 @@ button.secondary,
   color: var(--teal);
 }
 
+.eclipse-layer-list {
+  display: grid;
+  gap: 6px;
+  margin: 9px 0 12px;
+}
+
+.eclipse-layer-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #12110f;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.eclipse-layer-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.eclipse-layer-row button {
+  width: auto;
+  min-height: 24px;
+  margin: 0;
+  padding: 0 8px;
+  border-color: color-mix(in srgb, var(--rose) 68%, black);
+  background: #3c1f22;
+  font-size: 11px;
+}
+
 .constructor-help {
   display: grid;
   gap: 8px;

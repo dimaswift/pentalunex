@@ -203,8 +203,23 @@ return `
   ${options.graticule?.enabled ? `<g id="graticule" fill="none" stroke="${escapeAttr(options.graticule.color)}" stroke-width="${round(options.graticule.width)}" stroke-linejoin="round" stroke-linecap="round">
     ${graticulePaths.map((path) => `<path d="${path}"/>`).join("\n    ")}
   </g>` : ""}
-  ${renderEclipseSvgFragment(address, options, geometry)}
+  ${renderEclipseSvgLayer(address, options, geometry)}
 `;
+}
+
+function renderEclipseSvgLayer(address, options = {}, geometry) {
+  const eclipses = normalizeEclipses(options);
+  if (!eclipses.length) return "";
+  if (eclipses.length === 1) {
+    return renderEclipseSvgFragment(address, { ...options, eclipse: eclipses[0] }, geometry);
+  }
+  const fragments = eclipses.map((eclipse, index) => (
+    renderEclipseSvgFragment(address, { ...options, eclipse }, geometry).replaceAll('id="', `id="eclipse${index + 1}-`)
+  )).filter(Boolean);
+  if (!fragments.length) return "";
+  return `<g id="eclipses">
+    ${fragments.join("\n    ")}
+  </g>`;
 }
 
 export function renderEclipseSvgFragment(address, options = {}, geometry) {
@@ -466,6 +481,11 @@ function triangleGeometry(address, width, height, mirrored, orientation) {
     trianglePath: vertices.map(([u, v]) => project(u, v)),
     project,
   };
+}
+
+function normalizeEclipses(options) {
+  if (Array.isArray(options.eclipses) && options.eclipses.length) return options.eclipses;
+  return options.eclipse ? [options.eclipse] : [];
 }
 
 function geometryRingSets(geometry) {

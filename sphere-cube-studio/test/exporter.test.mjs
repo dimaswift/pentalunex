@@ -138,6 +138,47 @@ test("SVG eclipse export adds a separate clipped path layer", () => {
   assert.match(svg, /stroke-width="4.5"/);
 });
 
+test("SVG eclipse export supports multiple eclipse layers", () => {
+  const address = lonLatToTriAddress(69.3, 1.6, 0);
+  const baseEclipse = {
+    sarosPosition: 22,
+    datetime_utc: "2010-01-15 07:07:39",
+    type: "A",
+    stroke: "#ffd16c",
+    fill: "#ff8800",
+    width: 4.5,
+    fillOpacity: 0.25,
+    geometry: {
+      type: "MultiPolygon",
+      coordinates: [[[
+        [68, 0],
+        [71, 0],
+        [71, 4],
+        [68, 4],
+        [68, 0],
+      ]]],
+    },
+  };
+  const svg = renderTriangleSvg(address, [], {
+    type: "svg",
+    depth: 0,
+    mirror: false,
+    svgScale: 512,
+    pngResolution: 512,
+    border: { enabled: false },
+    graticule: { enabled: false, color: "#37c8b1", width: 0.6, step: 15, sampleStep: 1 },
+    style,
+    eclipses: [
+      { ...baseEclipse, sarosNumber: 141 },
+      { ...baseEclipse, sarosNumber: 145, stroke: "#ff66aa" },
+    ],
+  });
+  assert.match(svg, /id="eclipses"/);
+  assert.match(svg, /data-saros="141"/);
+  assert.match(svg, /data-saros="145"/);
+  assert.match(svg, /stroke="#ff66aa"/);
+});
+
 test("backside SVG contains chirality key and global number", () => {
   const address = lonLatToTriAddress(0, 0, 1);
   const regular = renderBacksideSvg(address, {

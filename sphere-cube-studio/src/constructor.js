@@ -36,7 +36,7 @@ export function createTileConstructor(config) {
     orientation: null,
     style: null,
     polygons: null,
-    eclipse: null,
+    eclipses: [],
     eclipseStyle: { stroke: "#ffd16c", fill: "#ffd16c", width: 4, fillOpacity: 0.28 },
     mapCache: new Map(),
     cacheSignature: "",
@@ -82,13 +82,13 @@ export function createTileConstructor(config) {
     state.view.rotation = Number(next.viewRotation ?? state.view.rotation ?? 0);
     state.style = next.style;
     state.polygons = next.polygons;
-    state.eclipse = next.eclipse ?? null;
+    state.eclipses = normalizeEclipses(next);
     state.eclipseStyle = next.eclipseStyle ?? state.eclipseStyle;
     state.gridSide = gridSideForDepth(state.depth);
     state.unitScale = state.gridSide * (2 ** state.depth);
     const cacheSignature = [
       state.polygons?.length ?? 0,
-      state.eclipse?.signature ?? "no-eclipse",
+      state.eclipses.map((eclipse) => eclipse.signature).join(",") || "no-eclipse",
       state.eclipseStyle?.stroke,
       state.eclipseStyle?.fill,
       state.eclipseStyle?.width,
@@ -668,7 +668,14 @@ export function createTileConstructor(config) {
   }
 
   function renderConstructedSvg(polygons, options) {
-    const frontBounds = boundsForPieces(state.pieces);
+    const exportRotation = Number(options.viewRotation ?? state.view.rotation ?? 0);
+    const baseBounds = boundsForPieces(state.pieces);
+    const exportCenter = [
+      (baseBounds.minX + baseBounds.maxX) * 0.5,
+      (baseBounds.minY + baseBounds.maxY) * 0.5,
+    ];
+    const rotateForExport = (point) => rotateAround(point, exportCenter, exportRotation);
+    const frontBounds = boundsForPoints(state.pieces.flatMap((piece) => transformedTriangle(piece).map(rotateForExport)));
     const frontHeight = Math.max(1, frontBounds.maxY - frontBounds.minY);
     const backsideOffset = options.backside?.enabled ? frontHeight + state.unitScale * 0.42 : 0;
     const bounds = options.backside?.enabled
@@ -687,10 +694,15 @@ export function createTileConstructor(config) {
       (point[0] - bounds.minX) * scale + offsetX,
       (point[1] - bounds.minY) * scale + offsetY,
     ];
+    const projectFrontPoint = (point) => projectScreen(rotateForExport(point));
+    const projectBackPoint = (point) => {
+      const rotated = rotateForExport(point);
+      return projectScreen([rotated[0], rotated[1] + backsideOffset]);
+    };
     const parts = state.pieces.map((piece, index) => {
       const geometry = {
-        trianglePath: transformedTriangle(piece).map(projectScreen),
-        project: (u, v) => projectScreen(screenPointForUV(piece, u, v)),
+        trianglePath: transformedTriangle(piece).map(projectFrontPoint),
+        project: (u, v) => projectFrontPoint(screenPointForUV(piece, u, v)),
       };
       const fragment = renderTriangleSvgFragment(piece.address, polygons, {
         ...options,
@@ -700,31 +712,34 @@ export function createTileConstructor(config) {
       }, geometry).replaceAll('id="', `id="piece${index + 1}-`);
       return `<g data-piece="${piece.id}" data-address="${escapeAttr(addressVariantKey(piece.address))}" data-variant="${piece.variant}" data-mirrored="${piece.mirrored ? "1" : "0"}">${fragment}</g>`;
     });
-    const eclipseParts = options.eclipse?.geometry ? state.pieces.map((piece, index) => {
-      const geometry = {
-        trianglePath: transformedTriangle(piece).map(projectScreen),
-        project: (u, v) => projectScreen(screenPointForUV(piece, u, v)),
-      };
-      return renderEclipseSvgFragment(piece.address, {
-        ...options,
-        orientation: state.orientation,
-        mirrored: piece.mirrored,
-      }, geometry).replaceAll('id="', `id="piece${index + 1}-eclipse-`);
-    }).filter(Boolean) : [];
-    if (eclipseParts.length) {
-      const eclipse = options.eclipse;
-      parts.push(`<g id="eclipse" data-saros="${escapeAttr(eclipse.sarosNumber ?? "")}" data-position="${escapeAttr(eclipse.sarosPosition ?? "")}" data-type="${escapeAttr(eclipse.type ?? "")}">
+    const eclipses = normalizeEclipseOptions(options);
+    const eclipseLayers = eclipses.map((eclipse, eclipseIndex) => {
+      const eclipseParts = state.pieces.map((piece, pieceIndex) => {
+        const geometry = {
+          trianglePath: transformedTriangle(piece).map(projectFrontPoint),
+          project: (u, v) => projectFrontPoint(screenPointForUV(piece, u, v)),
+        };
+        return renderEclipseSvgFragment(piece.address, {
+          ...options,
+          eclipse,
+          orientation: state.orientation,
+          mirrored: piece.mirrored,
+        }, geometry).replaceAll('id="', `id="eclipse${eclipseIndex + 1}-piece${pieceIndex + 1}-`);
+      }).filter(Boolean);
+      return `<g id="eclipse-${eclipseIndex + 1}" data-saros="${escapeAttr(eclipse.sarosNumber ?? "")}" data-position="${escapeAttr(eclipse.sarosPosition ?? "")}" data-type="${escapeAttr(eclipse.type ?? "")}">
 ${eclipseParts.join("\n")}
+</g>`;
+    });
+    if (eclipseLayers.length) {
+      parts.push(`<g id="eclipses">
+${eclipseLayers.join("\n")}
 </g>`);
     }
     if (options.backside?.enabled) {
       parts.push(...state.pieces.map((piece, index) => {
         const geometry = {
-          trianglePath: transformedTriangle(piece).map((point) => projectScreen([point[0], point[1] + backsideOffset])),
-          project: (u, v) => {
-            const point = screenPointForUV(piece, u, v);
-            return projectScreen([point[0], point[1] + backsideOffset]);
-          },
+          trianglePath: transformedTriangle(piece).map(projectBackPoint),
+          project: (u, v) => projectBackPoint(screenPointForUV(piece, u, v)),
         };
         const label = tileBacksideLabel(piece.address, piece.mirrored);
         const fragment = renderBacksideSvgFragment(geometry, label, index + 1, options).replaceAll('id="', `id="piece${index + 1}-`);
@@ -765,7 +780,7 @@ ${parts.join("\n")}
       ["mode", state.mirrorMode ? "mirror" : "regular"],
       ["zoom", `${Math.round(state.view.scale * 100)}%`],
       ["depth", String(state.depth)],
-      ["eclipse", state.eclipse?.label ?? "none"],
+      ["eclipses", state.eclipses.length ? String(state.eclipses.length) : "none"],
       ["tiles", String(state.pieces.length)],
     ];
     const piece = selectedPiece();
@@ -780,7 +795,7 @@ ${parts.join("\n")}
 
   function drawPiece(ctx, piece) {
     const vertices = transformedTriangle(piece);
-    if (state.polygons?.length || state.eclipse?.geometry) {
+    if (state.polygons?.length || state.eclipses.length) {
       drawCachedPieceMap(ctx, piece);
     } else {
       ctx.save();
@@ -880,18 +895,18 @@ ${parts.join("\n")}
       state.orientation,
       true,
     );
-    if (state.eclipse?.geometry) {
+    for (const eclipse of state.eclipses) {
       drawEclipseOnTriangle(
         localCtx,
         piece.address,
         trianglePath,
         (u, v) => toCachePoint(rotatePoint(localPointForUV(piece, u, v), angle)),
-        state.eclipse,
+        eclipse,
         {
-          fill: state.eclipseStyle?.fill ?? "#ffd16c",
-          fillOpacity: state.eclipseStyle?.fillOpacity ?? 0.28,
-          stroke: state.eclipseStyle?.stroke ?? "#ffd16c",
-          width: Math.max(1.2, (state.eclipseStyle?.width ?? 4) * rasterScale),
+          fill: eclipse.fill ?? state.eclipseStyle?.fill ?? "#ffd16c",
+          fillOpacity: eclipse.fillOpacity ?? state.eclipseStyle?.fillOpacity ?? 0.28,
+          stroke: eclipse.stroke ?? state.eclipseStyle?.stroke ?? "#ffd16c",
+          width: Math.max(1.2, (eclipse.width ?? state.eclipseStyle?.width ?? 4) * rasterScale),
         },
         state.orientation,
       );
@@ -1193,6 +1208,16 @@ function gridSideForDepth(depth) {
   return Math.max(24, Math.min(108, 320 / (2 ** depth)));
 }
 
+function normalizeEclipses(next) {
+  if (Array.isArray(next.eclipses) && next.eclipses.length) return next.eclipses;
+  return next.eclipse ? [next.eclipse] : [];
+}
+
+function normalizeEclipseOptions(options) {
+  if (Array.isArray(options.eclipses) && options.eclipses.length) return options.eclipses;
+  return options.eclipse ? [options.eclipse] : [];
+}
+
 function addressVariantKey(address) {
   return `${address.face}.${address.variant ?? 0}:${address.root}:${(address.path ?? []).join("") || "root"}`;
 }
@@ -1233,6 +1258,11 @@ function rotatePoint(point, deg) {
     point[0] * c - point[1] * s,
     point[0] * s + point[1] * c,
   ];
+}
+
+function rotateAround(point, center, deg) {
+  const rotated = rotatePoint([point[0] - center[0], point[1] - center[1]], deg);
+  return [rotated[0] + center[0], rotated[1] + center[1]];
 }
 
 function isOppositeSide(a, b, edge) {

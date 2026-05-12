@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Octal Glyph Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Octal Glyph Studio</h1>
+    <p class="sub">Procedural glyphs from octal numbers. Each row encodes 12 bits (4 octal digits).</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <label class="field">
+        <span>Octal value</span>
+        <input id="octal" type="text" inputmode="numeric" autocomplete="off"
+               value="3725" placeholder="e.g. 3725" />
+        <small id="decimal" class="hint"></small>
+      </label>
+
+      <div class="row">
+        <label class="field">
+          <span>Size <output id="sizeOut">14</output></span>
+          <input id="size" type="range" min="2" max="60" step="1" value="14" />
+        </label>
+        <label class="field">
+          <span>Thickness <output id="thicknessOut">3</output></span>
+          <input id="thickness" type="range" min="0.25" max="20" step="0.25" value="3" />
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field">
+          <span>Angle <output id="angleOut">0°</output></span>
+          <input id="angle" type="range" min="-180" max="180" step="1" value="0" />
+        </label>
+        <label class="field">
+          <span>Padding <output id="paddingOut">4</output></span>
+          <input id="padding" type="range" min="0" max="40" step="1" value="4" />
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field">
+          <span>Fill</span>
+          <input id="color" type="color" value="#111111" />
+        </label>
+        <label class="field">
+          <span>Background</span>
+          <input id="background" type="color" value="#ffffff" />
+        </label>
+        <label class="field check">
+          <input id="bgEnabled" type="checkbox" checked />
+          <span>Background on</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field check">
+          <input id="merge" type="checkbox" checked />
+          <span>Merge polygons</span>
+        </label>
+        <label class="field">
+          <span>Row limit</span>
+          <input id="limit" type="number" min="1" max="20" step="1" value="6" />
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field check">
+          <input id="rhombic" type="checkbox" />
+          <span>Rhombic lattice</span>
+        </label>
+        <label class="field" id="ratioField">
+          <span>Vertical stretch <output id="ratioOut">2.00</output></span>
+          <input id="ratio" type="range" min="1" max="3" step="0.05" value="2" />
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="field">
+          <span>Miter limit <output id="miterOut">10</output></span>
+          <input id="miter" type="range" min="1" max="32" step="0.5" value="10" />
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="download" type="button">Download SVG</button>
+        <button id="copy" type="button">Copy SVG</button>
+      </div>
+
+      <details class="src">
+        <summary>SVG source</summary>
+        <textarea id="source" readonly spellcheck="false"></textarea>
+      </details>
+    </section>
+
+    <section class="preview">
+      <div id="stage" class="stage"></div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

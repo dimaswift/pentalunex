@@ -29,6 +29,7 @@ const ctx = canvas.getContext("2d");
 const constructorCanvas = document.querySelector("#constructorCanvas");
 const globeCanvas = document.querySelector("#globeCanvas");
 const triangleCanvas = document.querySelector("#triangleCanvas");
+const eclipseLayerList = document.querySelector("#eclipseLayerList");
 
 const controls = {
   lon: document.querySelector("#lonInput"),
@@ -145,6 +146,7 @@ const state = {
     position: 0,
     series: [],
     record: null,
+    layers: [],
   },
   eclipseStyle: {
     stroke: "#ffd16c",
@@ -224,7 +226,7 @@ function syncFromControls() {
     polygons: state.landPolygons,
     seedAddress: state.selectedAddress,
     viewRotation: state.constructorRotation,
-    eclipse: selectedEclipseOverlay(),
+    eclipses: addedEclipseOverlays(),
     eclipseStyle: state.eclipseStyle,
   });
   queueRender();
@@ -375,7 +377,7 @@ function syncExportVisibility() {
 }
 
 function exportOptions({ includeEclipse = false } = {}) {
-  const eclipse = includeEclipse ? selectedEclipseOverlay() : null;
+  const eclipses = includeEclipse ? addedEclipseOverlays() : [];
   return {
     type: state.export.type,
     depth: state.depth,
@@ -391,13 +393,8 @@ function exportOptions({ includeEclipse = false } = {}) {
       sampleStep: state.sampleStep,
     },
     style: { ...state.mapStyle },
-    eclipse: eclipse ? {
-      ...eclipse,
-      stroke: state.eclipseStyle.stroke,
-      fill: state.eclipseStyle.fill,
-      width: state.eclipseStyle.width,
-      fillOpacity: state.eclipseStyle.fillOpacity,
-    } : null,
+    viewRotation: state.constructorRotation,
+    eclipses,
   };
 }
 
@@ -488,6 +485,65 @@ function selectedEclipseOverlay() {
   };
 }
 
+function addedEclipseOverlays() {
+  return state.eclipse.layers.map((record) => ({
+    ...record,
+    stroke: state.eclipseStyle.stroke,
+    fill: state.eclipseStyle.fill,
+    width: state.eclipseStyle.width,
+    fillOpacity: state.eclipseStyle.fillOpacity,
+  }));
+}
+
+function addSelectedEclipse() {
+  const record = selectedEclipseOverlay();
+  if (!record) {
+    outputs.status.textContent = "choose an eclipse first";
+    return;
+  }
+  if (state.eclipse.layers.some((layer) => layer.signature === record.signature)) {
+    outputs.status.textContent = `${record.label} is already added`;
+    return;
+  }
+  state.eclipse.layers.push(record);
+  renderEclipseLayerList();
+  syncFromControls();
+  outputs.status.textContent = `added ${record.label}`;
+}
+
+function removeEclipseLayer(signature) {
+  const before = state.eclipse.layers.length;
+  state.eclipse.layers = state.eclipse.layers.filter((layer) => layer.signature !== signature);
+  renderEclipseLayerList();
+  syncFromControls();
+  outputs.status.textContent = before === state.eclipse.layers.length ? "eclipse layer not found" : "removed eclipse layer";
+}
+
+function renderEclipseLayerList() {
+  eclipseLayerList.replaceChildren();
+  if (!state.eclipse.layers.length) {
+    const empty = document.createElement("div");
+    empty.className = "eclipse-layer-row";
+    const label = document.createElement("span");
+    label.textContent = "No eclipse layers added";
+    empty.append(label);
+    eclipseLayerList.append(empty);
+    return;
+  }
+  for (const layer of state.eclipse.layers) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const button = document.createElement("button");
+    row.className = "eclipse-layer-row";
+    label.textContent = layer.label;
+    button.type = "button";
+    button.textContent = "Remove";
+    button.addEventListener("click", () => removeEclipseLayer(layer.signature));
+    row.append(label, button);
+    eclipseLayerList.append(row);
+  }
+}
+
 function populateSarosOptions() {
   controls.sarosNumber.replaceChildren(new Option("None", ""));
   for (const number of SAROS_NUMBERS) {
@@ -500,11 +556,13 @@ function populateSarosOptions() {
 async function handleSarosNumberChange() {
   const value = controls.sarosNumber.value;
   if (!value) {
-    state.eclipse = { sarosNumber: null, position: 0, series: [], record: null };
+    state.eclipse.sarosNumber = null;
+    state.eclipse.position = 0;
+    state.eclipse.series = [];
+    state.eclipse.record = null;
     controls.sarosPosition.disabled = true;
     controls.sarosPosition.replaceChildren(new Option("Select saros first", ""));
-    syncFromControls();
-    outputs.status.textContent = "eclipse overlay off";
+    outputs.status.textContent = state.eclipse.layers.length ? "eclipse selection cleared" : "eclipse overlay off";
     return;
   }
 
@@ -524,7 +582,10 @@ async function handleSarosNumberChange() {
     syncFromControls();
     outputs.status.textContent = eclipseStatusLabel(state.eclipse.record);
   } catch (error) {
-    state.eclipse = { sarosNumber: null, position: 0, series: [], record: null };
+    state.eclipse.sarosNumber = null;
+    state.eclipse.position = 0;
+    state.eclipse.series = [];
+    state.eclipse.record = null;
     controls.sarosPosition.replaceChildren(new Option("Unavailable", ""));
     controls.sarosPosition.disabled = true;
     outputs.status.textContent = error.message;
@@ -610,6 +671,7 @@ for (const [name, control] of Object.entries(controls)) {
 controls.constructorRotation.addEventListener("input", syncConstructorRotation);
 controls.sarosNumber.addEventListener("change", handleSarosNumberChange);
 controls.sarosPosition.addEventListener("change", handleSarosPositionChange);
+document.querySelector("#addEclipseButton").addEventListener("click", addSelectedEclipse);
 
 function syncConstructorRotation() {
   state.constructorRotation = Number(controls.constructorRotation.value);
@@ -657,6 +719,7 @@ new ResizeObserver(() => tileConstructor.resize()).observe(constructorCanvas);
 new ResizeObserver(() => queueRender()).observe(globeCanvas);
 new ResizeObserver(() => queueRender()).observe(triangleCanvas);
 populateSarosOptions();
+renderEclipseLayerList();
 syncFromControls();
 setActiveTab(window.location.hash === "#constructor" ? "constructor" : "atlas", false);
 
@@ -671,7 +734,7 @@ getLandPolygons().then((polygons) => {
     polygons: state.landPolygons,
     seedAddress: state.selectedAddress,
     viewRotation: state.constructorRotation,
-    eclipse: selectedEclipseOverlay(),
+    eclipses: addedEclipseOverlays(),
     eclipseStyle: state.eclipseStyle,
   });
   queueRender();
