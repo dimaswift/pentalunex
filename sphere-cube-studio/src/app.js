@@ -491,6 +491,10 @@ document.querySelector("#exportAllButton").addEventListener("click", exportAll);
 document.querySelector("#atlasTabButton").addEventListener("click", () => setActiveTab("atlas"));
 document.querySelector("#constructorTabButton").addEventListener("click", () => setActiveTab("constructor"));
 document.querySelector("#addTileButton").addEventListener("click", () => tileConstructor.placeSeed());
+document.querySelector("#reseedButton").addEventListener("click", () => {
+  const value = document.querySelector("#constructorSeedInput").value.trim();
+  tileConstructor.reseed(value);
+});
 document.querySelector("#clearConstructorButton").addEventListener("click", () => tileConstructor.clear());
 document.querySelector("#exportConstructedButton").addEventListener("click", exportConstructed);
 document.querySelector("#exportTileJsonButton").addEventListener("click", exportTileJson);

@@ -619,6 +619,17 @@ export function isoCornerForFaceOrientation(face, orientation = 0) {
   return ISO_FACE_CORNERS[face][variant].slice();
 }
 
+// Chirality of an iso tile: the sign of the (u,v) -> screen Jacobian determinant.
+// Two adjacent tiles project the shared world edge in the same on-screen
+// direction only when their chiralities match; otherwise the seam needs to be
+// crossed with a mirrored neighbour. The sign reduces to -parity of the viewing
+// corner because the iso projection's handedness flips when the viewpoint moves
+// between the cube's two inscribed tetrahedra.
+export function isoChirality(face, variant = 0) {
+  const corner = isoCornerForFaceOrientation(face, variant);
+  return -corner[0] * corner[1] * corner[2];
+}
+
 export function isoProjectVector(vector, corner = [1, 1, 1]) {
   const x = vector[0] * corner[0];
   const y = vector[1] * corner[1];

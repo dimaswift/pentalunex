@@ -8,6 +8,8 @@ import {
   cubeFacePoint,
   faceUVToLonLat,
   faceUVToVector,
+  isoChirality,
+  isoCornerForFaceOrientation,
   isoProjectFaceUV,
   lonDelta,
   lonLatToCubeVector,
@@ -189,6 +191,22 @@ test("face edge adjacency is reciprocal", () => {
       const back = FACE_EDGE_ADJACENCY[link.toFace][link.toEdge];
       assert.equal(back.toFace, face, `F${face} ${edge} -> F${link.toFace} ${link.toEdge} back face`);
       assert.equal(back.toEdge, edge, `F${face} ${edge} -> F${link.toFace} ${link.toEdge} back edge`);
+    }
+  }
+});
+
+test("iso chirality matches the numerical Jacobian sign and equals -cornerParity", () => {
+  for (let face = 0; face < 6; face += 1) {
+    for (let variant = 0; variant < 2; variant += 1) {
+      const p00 = isoProjectFaceUV(face, 0, 0, variant);
+      const p10 = isoProjectFaceUV(face, 1, 0, variant);
+      const p01 = isoProjectFaceUV(face, 0, 1, variant);
+      const cross = (p10[0] - p00[0]) * (p01[1] - p00[1]) - (p10[1] - p00[1]) * (p01[0] - p00[0]);
+      const numericalSign = Math.sign(cross);
+      const corner = isoCornerForFaceOrientation(face, variant);
+      const cornerParity = corner[0] * corner[1] * corner[2];
+      assert.equal(isoChirality(face, variant), numericalSign, `F${face}.${variant} chirality mismatch`);
+      assert.equal(isoChirality(face, variant), -cornerParity, `F${face}.${variant} chirality != -parity`);
     }
   }
 });

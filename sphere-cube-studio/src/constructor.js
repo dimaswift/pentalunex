@@ -2,6 +2,7 @@ import {
   FACE_NAMES,
   addressKey,
   childTriangleVertices,
+  isoChirality,
   isoProjectFaceUV,
   neighborTriangleAddress,
   packPath,
@@ -56,6 +57,7 @@ export function createTileConstructor(config) {
     resize,
     render,
     placeSeed,
+    reseed,
     clear,
     exportJson,
     loadJson,
@@ -195,6 +197,64 @@ export function createTileConstructor(config) {
     config.setStatus("constructor cleared");
   }
 
+  function reseed(newSeedKey) {
+    if (!state.pieces.length) {
+      config.setStatus("no tiles to reseed");
+      return;
+    }
+    let newSeedAddress;
+    try {
+      newSeedAddress = parseSeedKey(newSeedKey ?? state.seedKey);
+    } catch (error) {
+      config.setStatus(error.message);
+      return;
+    }
+    const anchor = selectedPiece() ?? state.pieces[0];
+    // BFS from the anchor, recomputing each piece's address based on the chain of
+    // geometric adjacencies. Pieces that share an address with their neighbour and
+    // differ only in chirality are treated as mirror pairs (same new address).
+    const newAddresses = new Map();
+    newAddresses.set(anchor.id, newSeedAddress);
+    const queue = [anchor.id];
+    while (queue.length) {
+      const pieceId = queue.shift();
+      const piece = state.pieces.find((p) => p.id === pieceId);
+      const newAddr = newAddresses.get(pieceId);
+      for (let edge = 0; edge < 3; edge += 1) {
+        const adj = adjacentPlacedPiece(piece, edge);
+        if (!adj || newAddresses.has(adj.id)) continue;
+        const sameAddress = addressKey(adj.address) === addressKey(piece.address);
+        const oppositeMirror = Boolean(adj.mirrored) !== Boolean(piece.mirrored);
+        const adjAddr = sameAddress && oppositeMirror
+          ? cloneAddress(newAddr)
+          : neighborTriangleAddress(
+              newAddr,
+              edge,
+              newAddr.depth,
+              state.orientation,
+              adj.address.variant ?? adj.variant ?? 0,
+            );
+        newAddresses.set(adj.id, adjAddr);
+        queue.push(adj.id);
+      }
+    }
+    const unreached = state.pieces.filter((piece) => !newAddresses.has(piece.id));
+    for (const piece of state.pieces) {
+      const addr = newAddresses.get(piece.id);
+      if (!addr) continue;
+      piece.address = cloneAddress({ ...piece.address, ...addr, orientation: state.orientation });
+      piece.variant = addr.variant ?? piece.variant ?? 0;
+    }
+    state.seedKey = addressVariantKey(newSeedAddress);
+    state.seedAddress = newSeedAddress;
+    config.seedInput.value = state.seedKey;
+    state.mapCache.clear();
+    updateSelectionList();
+    render();
+    const warning = unreached.length ? ` (${unreached.length} disconnected piece${unreached.length === 1 ? "" : "s"} kept old address)` : "";
+    config.setStatus(`re-seeded to ${state.seedKey}${warning}`);
+  }
+
   function handleKey(event) {
     if (!state.active) return false;
     if (event.key === " ") {
@@ -323,21 +383,84 @@ export function createTileConstructor(config) {
       const address = cloneAddress(basePiece.address);
       const piece = createPiece(address, !basePiece.mirrored, 0, 0, 0, "candidate", basePiece.variant);
       alignAcrossEdge(piece, edge, transformedEdge(basePiece, edge), transformedTriangle(basePiece)[edge]);
-      return { piece, source: basePiece, edge, alignEdge: edge, mirrorMode: true };
+      const candidate = { piece, source: basePiece, edge, alignEdge: edge, mode: "self-reflection" };
+      return isCandidateConsistent(candidate) ? candidate : null;
     }
 
+    // Outside mirror mode we consider two adjacency families:
+    //   - regular adjacent: the geometric neighbour with matching chirality.
+    //   - mirror adjacent: same address as regular but flipped chirality. The
+    //     coast seam is continuous iff the candidate's chirality matches the
+    //     basePiece's (the two iso projections walk the shared world edge in the
+    //     same on-screen direction). We pick the mirror flag that makes this so.
+    const baseChir = effectiveChirality(basePiece);
     const probeNeighbor = neighborTriangleAddress(basePiece.address, edge, basePiece.address.depth, state.orientation);
     const variants = probeNeighbor.face === basePiece.address.face ? [basePiece.variant] : [0, 1];
     const candidates = variants.map((variant) => {
-      // Resolve the neighbor triangle in the target variant's split scheme.
       const address = neighborTriangleAddress(basePiece.address, edge, basePiece.address.depth, state.orientation, variant);
       const alignEdge = backEdgeFor(address, basePiece.address);
-      const piece = createPiece(address, basePiece.mirrored, 0, 0, 0, "candidate", variant);
+      const naturalChir = isoChirality(address.face, variant);
+      const needsMirror = (naturalChir * (basePiece.mirrored ? -1 : 1)) !== baseChir;
+      const mirrored = needsMirror ? !basePiece.mirrored : basePiece.mirrored;
+      const piece = createPiece(address, mirrored, 0, 0, 0, "candidate", variant);
       alignAcrossEdge(piece, alignEdge, transformedEdge(basePiece, edge), transformedTriangle(basePiece)[edge]);
-      return { piece, source: basePiece, edge, alignEdge, mirrorMode: false };
+      return {
+        piece,
+        source: basePiece,
+        edge,
+        alignEdge,
+        mode: needsMirror ? "mirror-adjacent" : "regular",
+      };
     });
     candidates.sort((a, b) => angleDistance(a.piece.rotation, basePiece.rotation) - angleDistance(b.piece.rotation, basePiece.rotation));
-    return candidates[0] ?? null;
+    return candidates.find(isCandidateConsistent) ?? null;
+  }
+
+  function effectiveChirality(piece) {
+    return isoChirality(piece.address.face, piece.variant ?? piece.address.variant ?? 0) * (piece.mirrored ? -1 : 1);
+  }
+
+  function isCandidateConsistent(candidate) {
+    // For each edge of the candidate, if a placed piece is geometrically adjacent on
+    // that edge, the relationship between them must be one of the three permitted
+    // adjacencies (regular, self-reflection, or mirror-adjacent). Otherwise placing
+    // the candidate would produce a seam mismatch with the existing tile.
+    const piece = candidate.piece;
+    for (let edge = 0; edge < 3; edge += 1) {
+      const adjacent = adjacentPlacedPiece(piece, edge);
+      if (!adjacent) continue;
+      if (adjacent.id === candidate.source?.id && edge === candidate.alignEdge) continue;
+      const expected = neighborTriangleAddress(
+        piece.address,
+        edge,
+        piece.address.depth,
+        state.orientation,
+        adjacent.address.variant ?? adjacent.variant ?? 0,
+      );
+      const isGeometricNeighbour = addressKey(expected) === addressKey(adjacent.address);
+      const isSelfReflection = addressKey(piece.address) === addressKey(adjacent.address)
+        && Boolean(piece.mirrored) !== Boolean(adjacent.mirrored);
+      // For a regular or mirror-adjacent seam to be continuous, the candidate and
+      // its placed neighbour must produce the same effective chirality.
+      const chiralitiesMatch = effectiveChirality(piece) === effectiveChirality(adjacent);
+      const matchesRegularFamily = isGeometricNeighbour && chiralitiesMatch;
+      if (!matchesRegularFamily && !isSelfReflection) return false;
+    }
+    return true;
+  }
+
+  function adjacentPlacedPiece(piece, edge) {
+    const verts = transformedTriangle(piece);
+    const center = centroid(verts);
+    const a = verts[(edge + 1) % 3];
+    const b = verts[(edge + 2) % 3];
+    const mid = midpoint(a, b);
+    const target = [2 * mid[0] - center[0], 2 * mid[1] - center[1]];
+    const threshold = Math.max(1, state.gridSide * 0.25);
+    return state.pieces.find((other) => {
+      const pc = centroid(transformedTriangle(other));
+      return Math.hypot(pc[0] - target[0], pc[1] - target[1]) < threshold;
+    }) ?? null;
   }
 
   function alignAcrossEdge(piece, alignEdge, targetEdge, baseOpposite) {
