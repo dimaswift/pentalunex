@@ -1,4 +1,4 @@
-export const COASTLINE_URL = "ne_50m_land.json";
+export const COASTLINE_URL = "ne_110m_land.json";
 
 let coastlinePromise = null;
 let polygonPromise = null;

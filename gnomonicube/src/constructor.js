@@ -156,8 +156,9 @@ export function createTileConstructor(config) {
     ctx.translate(state.view.x, state.view.y);
     ctx.scale(state.view.scale, state.view.scale);
     ctx.rotate(state.view.rotation * Math.PI / 180);
+
     state.visibleBounds = visibleWorldBounds();
-    drawTriangularGrid(ctx, state.visibleBounds);
+    //drawTriangularGrid(ctx, state.visibleBounds);
     const candidates = buildCandidates();
     for (const candidate of candidates) {
       if (isPieceVisible(candidate.piece)) drawCandidate(ctx, candidate);
@@ -807,7 +808,7 @@ ${parts.join("\n")}
 
     ctx.save();
     pathPolygon(ctx, vertices);
-    ctx.strokeStyle = piece.id === state.selectedPieceId ? "#f0b35a" : "rgba(243,239,230,0.42)";
+    ctx.strokeStyle = piece.id === state.selectedPieceId ? "#f0b35a" : "rgba(243,239,230,0)";
     ctx.lineWidth = worldLineWidth(piece.id === state.selectedPieceId ? 1.8 : 1);
     ctx.stroke();
     const center = centroid(vertices);
@@ -815,7 +816,7 @@ ${parts.join("\n")}
     ctx.font = `700 ${worldFontSize(11)}px Inter, system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(`${piece.address.face}.${piece.variant}:${piece.address.path.join("") || "r"}`, center[0], center[1]);
+    //ctx.fillText(`${piece.address.face}.${piece.variant}:${piece.address.path.join("") || "r"}`, center[0], center[1]);
     ctx.restore();
   }
 

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sphere Cube Studio</title>
+  <title>GNOMONICUBE</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
       <header class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
         <div>
-          <h1>Sphere Cube Studio</h1>
+          <h1>GNOMONICUBE</h1>
           <p>projection atlas</p>
         </div>
       </header>
@@ -81,20 +81,20 @@
         <h2>Map Style</h2>
         <label class="color-row">
           <span>Ocean</span>
-          <input id="oceanColorInput" type="color" value="#102725">
+          <input id="oceanColorInput" type="color" value="#000000">
         </label>
         <label class="color-row">
           <span>Land</span>
-          <input id="landColorInput" type="color" value="#b9b39f">
+          <input id="landColorInput" type="color" value="#ffffff">
         </label>
         <label class="color-row">
           <span>Border</span>
-          <input id="coastColorInput" type="color" value="#f0dcc0">
+          <input id="coastColorInput" type="color" value="#555555">
         </label>
         <label class="field">
           <span>Border thickness</span>
-          <output id="coastWidthValue">0.70</output>
-          <input id="coastWidthInput" type="range" min="0" max="3" step="0.05" value="0.7">
+          <output id="coastWidthValue">0.0</output>
+          <input id="coastWidthInput" type="range" min="0" max="3" step="0.05" value="0.0">
         </label>
       </section>
 
@@ -200,7 +200,7 @@
         <label class="field">
           <span>Orientation</span>
           <output id="constructorRotationValue">0</output>
-          <input id="constructorRotationInput" type="range" min="0" max="360" step="1" value="0">
+          <input id="constructorRotationInput" type="range" min="0" max="360" step="15" value="0">
         </label>
         <label class="select-field">
           <span>Saros</span>
@@ -216,11 +216,11 @@
         </label>
         <label class="color-row">
           <span>Eclipse path</span>
-          <input id="eclipseStrokeColorInput" type="color" value="#ffd16c">
+          <input id="eclipseStrokeColorInput" type="color" value="#FF0000">
         </label>
         <label class="color-row">
           <span>Eclipse fill</span>
-          <input id="eclipseFillColorInput" type="color" value="#ffd16c">
+          <input id="eclipseFillColorInput" type="color" value="#FF0000">
         </label>
         <label class="field">
           <span>Path thickness</span>

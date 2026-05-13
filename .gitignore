@@ -2,3 +2,4 @@ __pycache__
 export
 .claude
 python/saros-geo
+gnomonicube/src/saros-geo
